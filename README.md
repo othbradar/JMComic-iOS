@@ -48,6 +48,10 @@
 - macOS 与 Xcode（工程当前使用 iOS 26.5 SDK 验证）
 - 真机安装需要自己的 Apple Developer Team 或个人签名工具
 
+## 下载
+
+最新 IPA 可从 [GitHub Releases](https://github.com/othbradar/JMComic-iOS/releases/latest) 下载。公开产物为不包含个人证书或 Provisioning Profile 的 arm64 未签名 IPA，需要使用 AltStore、Sideloadly 或其他可靠工具以自己的证书重签后安装。
+
 ## 构建
 
 ```bash
