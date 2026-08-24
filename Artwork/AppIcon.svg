@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b82f7b"/>
+      <stop offset="1" stop-color="#5e35b1"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <circle cx="512" cy="474" r="342" fill="#ffffff" opacity="0.10"/>
+  <path d="M182 296c122-30 234-7 330 70v430c-92-75-202-105-330-69V296z" fill="#fff"/>
+  <path d="M842 296c-122-30-234-7-330 70v430c92-75 202-105 330-69V296z" fill="#fff" opacity="0.88"/>
+  <path d="M512 366v430" fill="none" stroke="#d9c9ef" stroke-width="16"/>
+  <text x="512" y="594" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-weight="800" font-size="190" fill="#713aa5">JM</text>
+</svg>

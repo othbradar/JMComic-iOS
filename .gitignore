@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+
+# Xcode user state and build output
+DerivedData/
+build/
+.build/
+Artifacts/
+*.xcarchive
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcuserstate
+xcuserdata/
+
+# XcodeGen / SwiftPM local state
+.swiftpm/
+
+# Signing and export material
+*.mobileprovision
+*.p12
+*.cer
+*.key
+*.pem
+ExportOptions.plist
+
+# Local archives and runtime data
+*.zip
+*.db
+*.db-wal
+*.db-shm
+library.json
+cache/
+download/
+database/
+
+# Editors
+.idea/
+.vscode/

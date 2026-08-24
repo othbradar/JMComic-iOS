@@ -1,0 +1,675 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		08EE80C0ED5B2739E52B114D /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9B79129F6F2C41177223632 /* AppAppearance.swift */; };
+		0A60C4C33584C0BD6AC1B38E /* OfflineLibraryDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = D27F8ABB245769E2413AC25C /* OfflineLibraryDatabase.swift */; };
+		124E66C46A3F66D633DF42FB /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 2ED2A6090FACA4EA4BEAEB8A /* libsqlite3.tbd */; };
+		15F474D4F6ED5EA86E3182D6 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05FED1B15EFAF4AF8FA1F776 /* APIClient.swift */; };
+		1B45CD8B65B4B267BF11BD7B /* ComicDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E8A67E8C9E9916FDBCE7C99 /* ComicDetailView.swift */; };
+		1BEBBCE10EB38A11F7ADFA47 /* DownloadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FBA2B45A29C7B25A55B818C /* DownloadsView.swift */; };
+		1CB9975837C6678399A0DFDF /* FavoritePickerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5D95AE662B09A868A15F6A6E /* FavoritePickerSheet.swift */; };
+		21D7870BF9A637248D43444C /* ReadingProgressStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64675E4E3DE30479CDCDA36E /* ReadingProgressStore.swift */; };
+		22DBAD6DCA48FBEC0D67817C /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1F13D58E5A7C7600AF8CF25 /* KeychainStore.swift */; };
+		355638F3631241161B1B99A6 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 60D373405418744A2F5CC1A0 /* PrivacyInfo.xcprivacy */; };
+		379FFF929A21CA356A381BAA /* JMCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F84830794FE6DD8805ED363 /* JMCrypto.swift */; };
+		3F4B00F04B4B0B1A50F0A899 /* ComicGrid.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE717FDF10C4D21B74253A7A /* ComicGrid.swift */; };
+		62916BE77A7452182E72FA44 /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B32D9EB552F7EE42930F5620 /* DownloadManager.swift */; };
+		76FBE6814D527BE4EED708B5 /* ReadingHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45F219830171BEEC091B7627 /* ReadingHistoryStore.swift */; };
+		806B4A50ED490AEA4529B9F3 /* FavoritesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A635C571206238B4AFE0977A /* FavoritesView.swift */; };
+		8B915C20F1A92F16B9476FEF /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EE31E30B9834AAF2EA1E1CE /* SearchView.swift */; };
+		8CC42623A4329CA7FDD04F64 /* JMServiceAddresses.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEBF2A213DF6F42D7A29900B /* JMServiceAddresses.swift */; };
+		92D9832DD93AF08286BEB63F /* CommentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA25AF5399C33442EAF5938A /* CommentsView.swift */; };
+		96D3F4587460F5AEDAF70110 /* ExploreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0102A9EB56FCCF052B4E13F6 /* ExploreView.swift */; };
+		A97B1F92EF030F311B33C8A6 /* ReaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CB309020B1E501E06BD66AD /* ReaderView.swift */; };
+		AD6124ED9EA2D84D506D3755 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 0100821D62815085A0857E73 /* Assets.xcassets */; };
+		AF921DA2818923F3ABEAF627 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DE65A019234529F2E2ADB19 /* RootView.swift */; };
+		D0033DD4CEC1E805A067DC9C /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A871E52C1DD9050619C07ADB /* AppConfiguration.swift */; };
+		D04DC56287C4635A3B39A442 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0524584F87E521FC6E341CC /* Models.swift */; };
+		D7A596F22DFB6810876BF7A3 /* JMComicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 960F95A2586BF617C063C421 /* JMComicTests.swift */; };
+		E939CB8B34503D41C8BFB36F /* JMServiceResponseSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = D93B1C47AA6441FC6BCB44D7 /* JMServiceResponseSchema.swift */; };
+		EA31297C53383F69682BCA19 /* JMComicApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 772D73E78BDDBA4E403E4231 /* JMComicApp.swift */; };
+		EEC356798B1F8E04D1431D1B /* AccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F47476A133CAB990F1115876 /* AccountView.swift */; };
+		F24C8E41517AB76391CC3B3D /* DailyStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38DACDA6CF7564B6EC742DE9 /* DailyStatus.swift */; };
+		F59071FB885BF5C1D56EA293 /* JMServiceProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7628D945915D1F52D8BF1B8A /* JMServiceProtocol.swift */; };
+		FDC85A4280C643C44658734E /* RemoteComicImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF5152E263F0055DE8F9E2E7 /* RemoteComicImage.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		156328534A463B601D31F1CA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A55A318A0EC4ACECFDC99D16 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CF16BFCA4F431EE9808E089A;
+			remoteInfo = JMComic;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0100821D62815085A0857E73 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		0102A9EB56FCCF052B4E13F6 /* ExploreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreView.swift; sourceTree = "<group>"; };
+		05FED1B15EFAF4AF8FA1F776 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		16E24A52CFE7EA5E20D2209F /* JMComicTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = JMComicTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1CB309020B1E501E06BD66AD /* ReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderView.swift; sourceTree = "<group>"; };
+		2DE65A019234529F2E2ADB19 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		2ED2A6090FACA4EA4BEAEB8A /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+		38DACDA6CF7564B6EC742DE9 /* DailyStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStatus.swift; sourceTree = "<group>"; };
+		3EE31E30B9834AAF2EA1E1CE /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
+		45F219830171BEEC091B7627 /* ReadingHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingHistoryStore.swift; sourceTree = "<group>"; };
+		5D95AE662B09A868A15F6A6E /* FavoritePickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritePickerSheet.swift; sourceTree = "<group>"; };
+		5FBA2B45A29C7B25A55B818C /* DownloadsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsView.swift; sourceTree = "<group>"; };
+		60D373405418744A2F5CC1A0 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		64675E4E3DE30479CDCDA36E /* ReadingProgressStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingProgressStore.swift; sourceTree = "<group>"; };
+		7628D945915D1F52D8BF1B8A /* JMServiceProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JMServiceProtocol.swift; sourceTree = "<group>"; };
+		772D73E78BDDBA4E403E4231 /* JMComicApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JMComicApp.swift; sourceTree = "<group>"; };
+		8E8A67E8C9E9916FDBCE7C99 /* ComicDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComicDetailView.swift; sourceTree = "<group>"; };
+		8F84830794FE6DD8805ED363 /* JMCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JMCrypto.swift; sourceTree = "<group>"; };
+		960F95A2586BF617C063C421 /* JMComicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JMComicTests.swift; sourceTree = "<group>"; };
+		A635C571206238B4AFE0977A /* FavoritesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
+		A871E52C1DD9050619C07ADB /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		B1F13D58E5A7C7600AF8CF25 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
+		B32D9EB552F7EE42930F5620 /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
+		CF5152E263F0055DE8F9E2E7 /* RemoteComicImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteComicImage.swift; sourceTree = "<group>"; };
+		D0524584F87E521FC6E341CC /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		D27F8ABB245769E2413AC25C /* OfflineLibraryDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLibraryDatabase.swift; sourceTree = "<group>"; };
+		D93B1C47AA6441FC6BCB44D7 /* JMServiceResponseSchema.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JMServiceResponseSchema.swift; sourceTree = "<group>"; };
+		DA25AF5399C33442EAF5938A /* CommentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommentsView.swift; sourceTree = "<group>"; };
+		DEBF2A213DF6F42D7A29900B /* JMServiceAddresses.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JMServiceAddresses.swift; sourceTree = "<group>"; };
+		E9B79129F6F2C41177223632 /* AppAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAppearance.swift; sourceTree = "<group>"; };
+		F43AFC5761F80D069FF1164B /* JMComic.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = JMComic.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F47476A133CAB990F1115876 /* AccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountView.swift; sourceTree = "<group>"; };
+		FE717FDF10C4D21B74253A7A /* ComicGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComicGrid.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B3703289A897D0850FDE4109 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				124E66C46A3F66D633DF42FB /* libsqlite3.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		07244F3849C0106AE5878F31 /* JMComicTests */ = {
+			isa = PBXGroup;
+			children = (
+				960F95A2586BF617C063C421 /* JMComicTests.swift */,
+			);
+			path = JMComicTests;
+			sourceTree = "<group>";
+		};
+		0D5835DDAFDC9698C4979F94 /* Explore */ = {
+			isa = PBXGroup;
+			children = (
+				0102A9EB56FCCF052B4E13F6 /* ExploreView.swift */,
+			);
+			path = Explore;
+			sourceTree = "<group>";
+		};
+		0E8DDD5506F3A6974C740137 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				0100821D62815085A0857E73 /* Assets.xcassets */,
+				60D373405418744A2F5CC1A0 /* PrivacyInfo.xcprivacy */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		2004291337BC8733EC8F5EDF /* JMComic */ = {
+			isa = PBXGroup;
+			children = (
+				B5443E96723DB4F0FCA471E6 /* App */,
+				21E0CB7941200AEAC81F8D5C /* Components */,
+				D211F4ABCBC80F259A7BA842 /* Core */,
+				FC39864E450D471FCE14B0A1 /* Features */,
+				5B73A1B12994E729F2560C00 /* JMService */,
+				AB3929841753B045A00652E3 /* Networking */,
+				0E8DDD5506F3A6974C740137 /* Resources */,
+				B60E37567B2DA7ADCE78C20F /* Services */,
+			);
+			path = JMComic;
+			sourceTree = "<group>";
+		};
+		21E0CB7941200AEAC81F8D5C /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				FE717FDF10C4D21B74253A7A /* ComicGrid.swift */,
+				CF5152E263F0055DE8F9E2E7 /* RemoteComicImage.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		2493ACB8EB8371CEB22061A4 /* Downloads */ = {
+			isa = PBXGroup;
+			children = (
+				5FBA2B45A29C7B25A55B818C /* DownloadsView.swift */,
+			);
+			path = Downloads;
+			sourceTree = "<group>";
+		};
+		32F19BFFC173A37096AD0160 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F43AFC5761F80D069FF1164B /* JMComic.app */,
+				16E24A52CFE7EA5E20D2209F /* JMComicTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3EA344E8DF09345655CCD5AF /* Search */ = {
+			isa = PBXGroup;
+			children = (
+				3EE31E30B9834AAF2EA1E1CE /* SearchView.swift */,
+			);
+			path = Search;
+			sourceTree = "<group>";
+		};
+		5B73A1B12994E729F2560C00 /* JMService */ = {
+			isa = PBXGroup;
+			children = (
+				DEBF2A213DF6F42D7A29900B /* JMServiceAddresses.swift */,
+				7628D945915D1F52D8BF1B8A /* JMServiceProtocol.swift */,
+				D93B1C47AA6441FC6BCB44D7 /* JMServiceResponseSchema.swift */,
+			);
+			path = JMService;
+			sourceTree = "<group>";
+		};
+		9BB2B23BCF2FED2EF7A4631E = {
+			isa = PBXGroup;
+			children = (
+				2004291337BC8733EC8F5EDF /* JMComic */,
+				07244F3849C0106AE5878F31 /* JMComicTests */,
+				C86D631BA55B05209FCA72CD /* Frameworks */,
+				32F19BFFC173A37096AD0160 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A130076F4596877CE6012B47 /* Detail */ = {
+			isa = PBXGroup;
+			children = (
+				8E8A67E8C9E9916FDBCE7C99 /* ComicDetailView.swift */,
+				DA25AF5399C33442EAF5938A /* CommentsView.swift */,
+			);
+			path = Detail;
+			sourceTree = "<group>";
+		};
+		AB3929841753B045A00652E3 /* Networking */ = {
+			isa = PBXGroup;
+			children = (
+				05FED1B15EFAF4AF8FA1F776 /* APIClient.swift */,
+				8F84830794FE6DD8805ED363 /* JMCrypto.swift */,
+			);
+			path = Networking;
+			sourceTree = "<group>";
+		};
+		B5443E96723DB4F0FCA471E6 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				772D73E78BDDBA4E403E4231 /* JMComicApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		B60E37567B2DA7ADCE78C20F /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				B32D9EB552F7EE42930F5620 /* DownloadManager.swift */,
+				D27F8ABB245769E2413AC25C /* OfflineLibraryDatabase.swift */,
+				45F219830171BEEC091B7627 /* ReadingHistoryStore.swift */,
+				64675E4E3DE30479CDCDA36E /* ReadingProgressStore.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		C86D631BA55B05209FCA72CD /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				2ED2A6090FACA4EA4BEAEB8A /* libsqlite3.tbd */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		D211F4ABCBC80F259A7BA842 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				E9B79129F6F2C41177223632 /* AppAppearance.swift */,
+				A871E52C1DD9050619C07ADB /* AppConfiguration.swift */,
+				38DACDA6CF7564B6EC742DE9 /* DailyStatus.swift */,
+				B1F13D58E5A7C7600AF8CF25 /* KeychainStore.swift */,
+				D0524584F87E521FC6E341CC /* Models.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		D2E34635F1FD8C330B9FF8DB /* Favorites */ = {
+			isa = PBXGroup;
+			children = (
+				5D95AE662B09A868A15F6A6E /* FavoritePickerSheet.swift */,
+				A635C571206238B4AFE0977A /* FavoritesView.swift */,
+			);
+			path = Favorites;
+			sourceTree = "<group>";
+		};
+		E9D10089822C2F1D30B47C15 /* Account */ = {
+			isa = PBXGroup;
+			children = (
+				F47476A133CAB990F1115876 /* AccountView.swift */,
+			);
+			path = Account;
+			sourceTree = "<group>";
+		};
+		ED7D49F4FAEF6077C33E5B98 /* Reader */ = {
+			isa = PBXGroup;
+			children = (
+				1CB309020B1E501E06BD66AD /* ReaderView.swift */,
+			);
+			path = Reader;
+			sourceTree = "<group>";
+		};
+		FC39864E450D471FCE14B0A1 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				2DE65A019234529F2E2ADB19 /* RootView.swift */,
+				E9D10089822C2F1D30B47C15 /* Account */,
+				A130076F4596877CE6012B47 /* Detail */,
+				2493ACB8EB8371CEB22061A4 /* Downloads */,
+				0D5835DDAFDC9698C4979F94 /* Explore */,
+				D2E34635F1FD8C330B9FF8DB /* Favorites */,
+				ED7D49F4FAEF6077C33E5B98 /* Reader */,
+				3EA344E8DF09345655CCD5AF /* Search */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A9F6B57DB30782A5BCC96C31 /* JMComicTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 6F811EE4599762F50AE47F69 /* Build configuration list for PBXNativeTarget "JMComicTests" */;
+			buildPhases = (
+				7FBD1699E79D2D20965BFB3C /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3C4A95AC1CC2BD13E5E82DEE /* PBXTargetDependency */,
+			);
+			name = JMComicTests;
+			packageProductDependencies = (
+			);
+			productName = JMComicTests;
+			productReference = 16E24A52CFE7EA5E20D2209F /* JMComicTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		CF16BFCA4F431EE9808E089A /* JMComic */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A78D049F5A6BB9B4C3166F4B /* Build configuration list for PBXNativeTarget "JMComic" */;
+			buildPhases = (
+				CFE8850607EDF152A7EE3123 /* Sources */,
+				2C013409AFFE53F389DC2000 /* Resources */,
+				B3703289A897D0850FDE4109 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = JMComic;
+			packageProductDependencies = (
+			);
+			productName = JMComic;
+			productReference = F43AFC5761F80D069FF1164B /* JMComic.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A55A318A0EC4ACECFDC99D16 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2600;
+				TargetAttributes = {
+					A9F6B57DB30782A5BCC96C31 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+					CF16BFCA4F431EE9808E089A = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 2A82CF7D5FABA7B5516CCD66 /* Build configuration list for PBXProject "JMComic" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 9BB2B23BCF2FED2EF7A4631E;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 32F19BFFC173A37096AD0160 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				CF16BFCA4F431EE9808E089A /* JMComic */,
+				A9F6B57DB30782A5BCC96C31 /* JMComicTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		2C013409AFFE53F389DC2000 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AD6124ED9EA2D84D506D3755 /* Assets.xcassets in Resources */,
+				355638F3631241161B1B99A6 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		7FBD1699E79D2D20965BFB3C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D7A596F22DFB6810876BF7A3 /* JMComicTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CFE8850607EDF152A7EE3123 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				15F474D4F6ED5EA86E3182D6 /* APIClient.swift in Sources */,
+				EEC356798B1F8E04D1431D1B /* AccountView.swift in Sources */,
+				08EE80C0ED5B2739E52B114D /* AppAppearance.swift in Sources */,
+				D0033DD4CEC1E805A067DC9C /* AppConfiguration.swift in Sources */,
+				1B45CD8B65B4B267BF11BD7B /* ComicDetailView.swift in Sources */,
+				3F4B00F04B4B0B1A50F0A899 /* ComicGrid.swift in Sources */,
+				92D9832DD93AF08286BEB63F /* CommentsView.swift in Sources */,
+				F24C8E41517AB76391CC3B3D /* DailyStatus.swift in Sources */,
+				62916BE77A7452182E72FA44 /* DownloadManager.swift in Sources */,
+				1BEBBCE10EB38A11F7ADFA47 /* DownloadsView.swift in Sources */,
+				96D3F4587460F5AEDAF70110 /* ExploreView.swift in Sources */,
+				1CB9975837C6678399A0DFDF /* FavoritePickerSheet.swift in Sources */,
+				806B4A50ED490AEA4529B9F3 /* FavoritesView.swift in Sources */,
+				EA31297C53383F69682BCA19 /* JMComicApp.swift in Sources */,
+				379FFF929A21CA356A381BAA /* JMCrypto.swift in Sources */,
+				8CC42623A4329CA7FDD04F64 /* JMServiceAddresses.swift in Sources */,
+				F59071FB885BF5C1D56EA293 /* JMServiceProtocol.swift in Sources */,
+				E939CB8B34503D41C8BFB36F /* JMServiceResponseSchema.swift in Sources */,
+				22DBAD6DCA48FBEC0D67817C /* KeychainStore.swift in Sources */,
+				D04DC56287C4635A3B39A442 /* Models.swift in Sources */,
+				0A60C4C33584C0BD6AC1B38E /* OfflineLibraryDatabase.swift in Sources */,
+				A97B1F92EF030F311B33C8A6 /* ReaderView.swift in Sources */,
+				76FBE6814D527BE4EED708B5 /* ReadingHistoryStore.swift in Sources */,
+				21D7870BF9A637248D43444C /* ReadingProgressStore.swift in Sources */,
+				FDC85A4280C643C44658734E /* RemoteComicImage.swift in Sources */,
+				AF921DA2818923F3ABEAF627 /* RootView.swift in Sources */,
+				8B915C20F1A92F16B9476FEF /* SearchView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		3C4A95AC1CC2BD13E5E82DEE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CF16BFCA4F431EE9808E089A /* JMComic */;
+			targetProxy = 156328534A463B601D31F1CA /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1B0462421507E21B642D6641 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 21;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		2B0807430333C9051B1A7BA9 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.jmcomic.mobile.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JMComic.app/JMComic";
+			};
+			name = Release;
+		};
+		35A2BBB17BF60A2999FCE746 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.jmcomic.mobile.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JMComic.app/JMComic";
+			};
+			name = Debug;
+		};
+		3946EC515C15E46FB24C5039 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = JMComic/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.jmcomic.mobile;
+				PRODUCT_NAME = JMComic;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		429056757953C7AAEEA3A4C3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = JMComic/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = io.github.jmcomic.mobile;
+				PRODUCT_NAME = JMComic;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		466040EA8C6AD0B26B81598D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 21;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2A82CF7D5FABA7B5516CCD66 /* Build configuration list for PBXProject "JMComic" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1B0462421507E21B642D6641 /* Debug */,
+				466040EA8C6AD0B26B81598D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6F811EE4599762F50AE47F69 /* Build configuration list for PBXNativeTarget "JMComicTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35A2BBB17BF60A2999FCE746 /* Debug */,
+				2B0807430333C9051B1A7BA9 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A78D049F5A6BB9B4C3166F4B /* Build configuration list for PBXNativeTarget "JMComic" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				429056757953C7AAEEA3A4C3 /* Debug */,
+				3946EC515C15E46FB24C5039 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A55A318A0EC4ACECFDC99D16 /* Project object */;
+}

@@ -1,0 +1,54 @@
+name: JMComic
+options:
+  bundleIdPrefix: io.github.jmcomic
+  deploymentTarget:
+    iOS: "18.0"
+  xcodeVersion: "26.0"
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    CURRENT_PROJECT_VERSION: 21
+    MARKETING_VERSION: 1.0.0
+    IPHONEOS_DEPLOYMENT_TARGET: 18.0
+    TARGETED_DEVICE_FAMILY: "1,2"
+    SUPPORTS_MACCATALYST: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  JMComic:
+    type: application
+    platform: iOS
+    dependencies:
+      - sdk: libsqlite3.tbd
+    sources:
+      - path: JMComic
+        excludes:
+          - "Resources/Preview Content"
+          - "Info.plist"
+    resources:
+      - path: JMComic/Resources
+        excludes:
+          - "Preview Content"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.jmcomic.mobile
+        PRODUCT_NAME: JMComic
+        ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME: AccentColor
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: JMComic/Info.plist
+    scheme:
+      testTargets:
+        - JMComicTests
+  JMComicTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: JMComicTests
+    dependencies:
+      - target: JMComic
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.jmcomic.mobile.tests
+        GENERATE_INFOPLIST_FILE: YES
