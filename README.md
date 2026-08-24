@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 
 > [!WARNING]
-> 本项目仅供具备完全民事行为能力的成年人学习、研究和自用。项目不提供、存储或分发任何漫画资源，也不是 JMComic 官方产品。
+> ⚠️⚠️本项目含NSFW内容，请酌情观看⚠️⚠️
 
 ## 项目预览
 
