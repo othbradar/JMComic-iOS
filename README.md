@@ -51,7 +51,7 @@
 ## 构建
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/othbradar/JMComic-iOS.git
 cd JMComic-iOS
 open JMComic.xcodeproj
 ```
