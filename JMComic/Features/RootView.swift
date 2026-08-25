@@ -1242,6 +1242,355 @@ final class RootTabGestureLifecycle {
     }
 }
 
+private struct RootTabLivePageTransition {
+    let source: RootTab
+    let destination: RootTab
+    let viewportWidth: CGFloat
+    var offset: CGFloat
+    var isSettling = false
+}
+
+/// Drives an interactive transition with the two real tab controller views.
+/// The native TabView remains the sole owner of selection, safe areas,
+/// NavigationStack containment and liquid-glass chrome. During a drag its
+/// selection never changes; only the already-owned source and adjacent views
+/// are translated inside the tab content container.
+@MainActor
+private final class RootTabLivePagePager {
+    private weak var tabBarController: UITabBarController?
+    private weak var sourceView: UIView?
+    private weak var destinationView: UIView?
+    private weak var transitionContainer: UIView?
+    private weak var warmupHost: UIView?
+    private var sourceFrame: CGRect = .zero
+    private var destination: RootTab?
+    private var animator: UIViewPropertyAnimator?
+    private var prewarmGeneration = 0
+
+    func attach(to tabBarController: UITabBarController) {
+        guard self.tabBarController !== tabBarController else {
+            schedulePrewarm(selectedIndex: tabBarController.selectedIndex)
+            return
+        }
+        cancelImmediately()
+        warmupHost?.removeFromSuperview()
+        warmupHost = nil
+        self.tabBarController = tabBarController
+        preloadPages()
+        schedulePrewarm(selectedIndex: tabBarController.selectedIndex)
+    }
+
+    func begin(source: RootTab, destination: RootTab) -> CGFloat? {
+        guard animator == nil,
+              let tabBarController,
+              tabBarController.selectedIndex == source.rawValue else { return nil }
+        let controllers = rootControllers(in: tabBarController)
+        guard controllers.indices.contains(source.rawValue),
+              controllers.indices.contains(destination.rawValue) else { return nil }
+
+        let sourceController = controllers[source.rawValue]
+        let destinationController = controllers[destination.rawValue]
+        sourceController.loadViewIfNeeded()
+        destinationController.loadViewIfNeeded()
+        tabBarController.view.layoutIfNeeded()
+
+        let sourceView = sourceController.view!
+        let destinationView = destinationController.view!
+        guard let container = sourceView.superview,
+              sourceView.window != nil,
+              sourceView.bounds.width > 1 else { return nil }
+
+        // Inactive root pages live in the off-screen warmup host between
+        // gestures. They have therefore already participated in a real window
+        // render pass and never expose the selected page's stale layer contents
+        // when moved next to the source page.
+        destinationView.removeFromSuperview()
+        destinationView.frame = sourceView.frame
+        destinationView.autoresizingMask = sourceView.autoresizingMask
+        destinationView.transform = CGAffineTransform(
+            translationX: destination.rawValue > source.rawValue
+                ? sourceView.bounds.width : -sourceView.bounds.width,
+            y: 0
+        )
+        container.insertSubview(destinationView, aboveSubview: sourceView)
+
+        self.sourceView = sourceView
+        self.destinationView = destinationView
+        transitionContainer = container
+        sourceFrame = sourceView.frame
+        self.destination = destination
+        return sourceView.bounds.width
+    }
+
+    func update(offset: CGFloat, viewportWidth: CGFloat) {
+        guard let sourceView, let destinationView, let destination else { return }
+        sourceView.transform = CGAffineTransform(translationX: offset, y: 0)
+        let base = destination.rawValue > (tabBarController?.selectedIndex ?? 0)
+            ? viewportWidth : -viewportWidth
+        destinationView.transform = CGAffineTransform(translationX: base + offset, y: 0)
+    }
+
+    func settle(
+        commit: Bool,
+        viewportWidth: CGFloat,
+        completion: @escaping () -> Void
+    ) {
+        guard let sourceView, let destinationView, let destination else {
+            completion()
+            return
+        }
+        let finalSourceOffset: CGFloat
+        let finalDestinationOffset: CGFloat
+        if commit {
+            finalSourceOffset = destination.rawValue > (tabBarController?.selectedIndex ?? 0)
+                ? -viewportWidth : viewportWidth
+            finalDestinationOffset = 0
+        } else {
+            finalSourceOffset = 0
+            finalDestinationOffset = destination.rawValue > (tabBarController?.selectedIndex ?? 0)
+                ? viewportWidth : -viewportWidth
+        }
+
+        let animator = UIViewPropertyAnimator(duration: 0.30, dampingRatio: 0.90) {
+            sourceView.transform = CGAffineTransform(translationX: finalSourceOffset, y: 0)
+            destinationView.transform = CGAffineTransform(
+                translationX: finalDestinationOffset,
+                y: 0
+            )
+        }
+        self.animator = animator
+        animator.addCompletion { [weak self] _ in
+            guard let self else { return }
+            self.animator = nil
+            if !commit {
+                self.restoreSourceHierarchy()
+            }
+            completion()
+        }
+        animator.startAnimation()
+    }
+
+    func commitSelection(to tab: RootTab) {
+        guard let tabBarController else {
+            clearReferences()
+            return
+        }
+        tabBarController.selectedIndex = tab.rawValue
+        tabBarController.view.setNeedsLayout()
+        tabBarController.view.layoutIfNeeded()
+
+        sourceView?.transform = .identity
+        destinationView?.transform = .identity
+        sourceView?.frame = sourceFrame
+        clearReferences()
+        schedulePrewarm(selectedIndex: tab.rawValue)
+    }
+
+    func cancelImmediately() {
+        animator?.stopAnimation(true)
+        animator = nil
+        restoreSourceHierarchy()
+    }
+
+    private func restoreSourceHierarchy() {
+        sourceView?.transform = .identity
+        sourceView?.frame = sourceFrame
+        destinationView?.transform = .identity
+        returnDestinationToWarmupHost()
+        transitionContainer?.setNeedsLayout()
+        transitionContainer?.layoutIfNeeded()
+        clearReferences()
+    }
+
+    private func returnDestinationToWarmupHost() {
+        guard let destinationView,
+              let sourceView,
+              let host = ensureWarmupHost(below: sourceView) else {
+            destinationView?.removeFromSuperview()
+            return
+        }
+        destinationView.removeFromSuperview()
+        destinationView.transform = .identity
+        destinationView.frame = host.bounds
+        destinationView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        host.addSubview(destinationView)
+        destinationView.setNeedsLayout()
+        destinationView.layoutIfNeeded()
+    }
+
+    private func clearReferences() {
+        sourceView = nil
+        destinationView = nil
+        transitionContainer = nil
+        sourceFrame = .zero
+        destination = nil
+    }
+
+    private func preloadPages() {
+        guard let tabBarController else { return }
+        rootControllers(in: tabBarController).forEach { $0.loadViewIfNeeded() }
+    }
+
+    /// Keep every inactive real tab view attached to the same window directly
+    /// underneath the selected, opaque root page. `loadViewIfNeeded()` alone is
+    /// insufficient for SwiftUI: its first layer transaction otherwise happens
+    /// only after a drag has already exposed the adjacent page. The selected
+    /// page fully covers this non-interactive host while all five real pages can
+    /// still participate in window layout and rendering ahead of interaction.
+    private func schedulePrewarm(selectedIndex: Int) {
+        prewarmGeneration += 1
+        let generation = prewarmGeneration
+        DispatchQueue.main.async { [weak self] in
+            self?.prewarmInactivePages(
+                selectedIndex: selectedIndex,
+                generation: generation,
+                remainingRenderTurns: 3
+            )
+        }
+    }
+
+    private func prewarmInactivePages(
+        selectedIndex: Int,
+        generation: Int,
+        remainingRenderTurns: Int
+    ) {
+        guard generation == prewarmGeneration,
+              animator == nil,
+              destination == nil,
+              let tabBarController else { return }
+        let controllers = rootControllers(in: tabBarController)
+        guard controllers.indices.contains(selectedIndex) else { return }
+
+        let selectedController = controllers[selectedIndex]
+        selectedController.loadViewIfNeeded()
+        let selectedView = selectedController.view!
+        guard selectedView.window != nil,
+              selectedView.superview != nil,
+              selectedView.bounds.width > 1,
+              let host = ensureWarmupHost(below: selectedView) else {
+            guard remainingRenderTurns > 0 else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.prewarmInactivePages(
+                    selectedIndex: selectedIndex,
+                    generation: generation,
+                    remainingRenderTurns: remainingRenderTurns - 1
+                )
+            }
+            return
+        }
+
+        for (index, controller) in controllers.enumerated() where index != selectedIndex {
+            controller.loadViewIfNeeded()
+            let view = controller.view!
+            view.transform = .identity
+            if view.superview !== host {
+                view.removeFromSuperview()
+                host.addSubview(view)
+            }
+            view.frame = host.bounds
+            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+        }
+        host.setNeedsLayout()
+        host.layoutIfNeeded()
+
+        // Leave the real pages connected for at least one more main render
+        // turn. This is not a gesture delay: it happens ahead of interaction
+        // and allows SwiftUI/Core Animation to commit their initial contents.
+        guard remainingRenderTurns > 0 else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.prewarmInactivePages(
+                selectedIndex: selectedIndex,
+                generation: generation,
+                remainingRenderTurns: remainingRenderTurns - 1
+            )
+        }
+    }
+
+    private func ensureWarmupHost(below selectedView: UIView) -> UIView? {
+        guard let container = selectedView.superview else { return nil }
+        if let warmupHost, warmupHost.superview === container {
+            positionWarmupHost(warmupHost, below: selectedView, in: container)
+            return warmupHost
+        }
+
+        warmupHost?.removeFromSuperview()
+        let host = UIView(frame: .zero)
+        host.backgroundColor = .clear
+        host.isUserInteractionEnabled = false
+        host.clipsToBounds = true
+        host.accessibilityElementsHidden = true
+        container.insertSubview(host, belowSubview: selectedView)
+        positionWarmupHost(host, below: selectedView, in: container)
+        warmupHost = host
+        return host
+    }
+
+    private func positionWarmupHost(
+        _ host: UIView,
+        below selectedView: UIView,
+        in container: UIView
+    ) {
+        guard selectedView.bounds.width > 1, selectedView.bounds.height > 1 else { return }
+        host.frame = selectedView.frame
+        host.autoresizingMask = selectedView.autoresizingMask
+        if host.superview === container {
+            container.insertSubview(host, belowSubview: selectedView)
+        }
+    }
+
+    private func rootControllers(in tabBarController: UITabBarController) -> [UIViewController] {
+        if #available(iOS 18.0, *), !tabBarController.tabs.isEmpty {
+            return tabBarController.tabs.compactMap(\.viewController)
+        }
+        return tabBarController.viewControllers ?? []
+    }
+}
+
+private struct RootTabControllerLocator: UIViewRepresentable {
+    let pager: RootTabLivePagePager
+
+    func makeUIView(context: Context) -> LocatorView {
+        let view = LocatorView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        view.didMoveToWindowHandler = { [weak pager] view in
+            guard let tabBarController = Self.tabBarController(from: view) else { return }
+            pager?.attach(to: tabBarController)
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: LocatorView, context: Context) {
+        guard let tabBarController = Self.tabBarController(from: uiView) else { return }
+        pager.attach(to: tabBarController)
+    }
+
+    final class LocatorView: UIView {
+        var didMoveToWindowHandler: ((LocatorView) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            didMoveToWindowHandler?(self)
+        }
+    }
+
+    private static func tabBarController(from view: UIView) -> UITabBarController? {
+        var responder: UIResponder? = view
+        while let current = responder {
+            if let controller = current as? UIViewController,
+               let tabBarController = (controller as? UITabBarController)
+                ?? controller.tabBarController {
+                return tabBarController
+            }
+            responder = current.next
+        }
+        return nil
+    }
+}
+
 @MainActor
 private final class RootTabDisplayRefreshGate {
     private var links: [UUID: RootTabOneShotDisplayLink] = [:]
@@ -1479,6 +1828,8 @@ struct RootView: View {
     @State private var gestureLifecycle = RootTabGestureLifecycle()
     @State private var selectionMutationGate = RootTabSelectionMutationGate()
     @State private var displayRefreshGate = RootTabDisplayRefreshGate()
+    @State private var livePagePager = RootTabLivePagePager()
+    @State private var livePageTransition: RootTabLivePageTransition?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -1495,6 +1846,7 @@ struct RootView: View {
                         )
                 }
                 .rootTabTransitionContainer(for: .explore)
+                .background { rootTabControllerLocator }
             }
             Tab("搜索", systemImage: "magnifyingglass", value: RootTab.search) {
                 NavigationStack(path: $searchNavigationPath) {
@@ -1509,10 +1861,12 @@ struct RootView: View {
                         )
                 }
                 .rootTabTransitionContainer(for: .search)
+                .background { rootTabControllerLocator }
             }
             Tab("收藏", systemImage: "heart", value: RootTab.favorites) {
                 FavoritesView()
                     .rootTabTransitionContainer(for: .favorites)
+                    .background { rootTabControllerLocator }
             }
             Tab("下载", systemImage: "arrow.down.circle", value: RootTab.downloads) {
                 NavigationStack(path: $downloadsNavigationPath) {
@@ -1526,6 +1880,7 @@ struct RootView: View {
                         )
                 }
                 .rootTabTransitionContainer(for: .downloads)
+                .background { rootTabControllerLocator }
             }
             Tab("我的", systemImage: "person.crop.circle", value: RootTab.account) {
                 NavigationStack(path: $accountNavigationPath) {
@@ -1540,6 +1895,7 @@ struct RootView: View {
                         )
                 }
                 .rootTabTransitionContainer(for: .account)
+                .background { rootTabControllerLocator }
             }
         }
         .tabViewStyle(.sidebarAdaptable)
@@ -1555,25 +1911,19 @@ struct RootView: View {
         .background {
             rootTabTrackpadBridge
         }
-        .overlay(alignment: .topLeading) {
-            sourcePageOverlay
-        }
-        .onGeometryChange(for: CGRect.self) { proxy in
-            proxy.frame(in: .global)
-        } action: { frame in
-            let previousFrame = rootGlobalFrame
-            rootGlobalFrame = frame
-            guard let transition = interactiveTransition,
-                  rootFrameChangedSignificantly(previousFrame, frame) else { return }
-            cancelTransitionForGeometryChange(transition)
-        }
         .onChange(of: selectedTab) { _, newSelection in
             if selectionMutationGate.consume(newSelection) { return }
-            guard interactiveTransition != nil else { return }
+            guard livePageTransition != nil else { return }
             // A tab-bar tap during a transition is external input and wins.
-            invalidateInteractiveTransition()
+            invalidateLivePageTransition()
         }
         .simultaneousGesture(rootTabDragGesture)
+    }
+
+    private var rootTabControllerLocator: some View {
+        RootTabControllerLocator(pager: livePagePager)
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -1587,23 +1937,23 @@ struct RootView: View {
                     )
                 },
                 onChanged: { startLocation, translation in
-                    if interactiveTransition == nil {
-                        beginInteractiveTransition(
+                    if livePageTransition == nil {
+                        beginLivePageTransition(
                             startLocation: startLocation,
                             translation: translation
                         )
                     } else {
-                        updateInteractiveTransition(translation: translation)
+                        updateLivePageTransition(translation: translation)
                     }
                 },
                 onEnded: { _, translation, predictedEndTranslation in
-                    finishInteractiveTransition(
+                    finishLivePageTransition(
                         translation: translation,
                         predictedEndTranslation: predictedEndTranslation
                     )
                 },
                 onCancelled: {
-                    finishInteractiveTransition(
+                    finishLivePageTransition(
                         translation: .zero,
                         predictedEndTranslation: .zero
                     )
@@ -1693,17 +2043,17 @@ struct RootView: View {
     private var rootTabDragGesture: some Gesture {
         DragGesture(minimumDistance: 10, coordinateSpace: .global)
             .onChanged { value in
-                if interactiveTransition == nil {
-                    beginInteractiveTransition(
+                if livePageTransition == nil {
+                    beginLivePageTransition(
                         startLocation: value.startLocation,
                         translation: value.translation
                     )
                 } else {
-                    updateInteractiveTransition(translation: value.translation)
+                    updateLivePageTransition(translation: value.translation)
                 }
             }
             .onEnded { value in
-                finishInteractiveTransition(
+                finishLivePageTransition(
                     translation: value.translation,
                     predictedEndTranslation: value.predictedEndTranslation
                 )
@@ -1715,8 +2065,8 @@ struct RootView: View {
         velocity: CGPoint
     ) -> Bool {
         guard !readerIsPresented,
-              !isSettlingRootTransition,
-              interactiveTransition == nil,
+              livePageTransition?.isSettling != true,
+              livePageTransition == nil,
               !gestureLifecycle.isActive,
               RootTabTrackpadPolicy.isHorizontal(velocity: velocity),
               RootTabSwipePolicy.adjacentTab(
@@ -1729,6 +2079,104 @@ struct RootView: View {
 
     private func activeSwipeSurface(at startLocation: CGPoint) -> RootTabSwipeSurface? {
         swipeRegistry.activeSurface(for: selectedTab, at: startLocation)
+    }
+
+    private func beginLivePageTransition(
+        startLocation: CGPoint,
+        translation: CGSize
+    ) {
+        guard !readerIsPresented,
+              livePageTransition == nil,
+              abs(translation.width) >= RootTabSwipePolicy.activationTranslation,
+              abs(translation.width) > abs(translation.height)
+                * RootTabSwipePolicy.horizontalDominance,
+              activeSwipeSurface(at: startLocation) != nil else { return }
+
+        guard let destination = RootTabSwipePolicy.adjacentTab(
+            from: selectedTab,
+            horizontalTranslation: translation.width
+        ), gestureLifecycle.begin() else { return }
+
+        let source = selectedTab
+        guard let width = livePagePager.begin(
+            source: source,
+            destination: destination
+        ) else {
+            gestureLifecycle.end()
+            return
+        }
+        let offset = RootTabSwipePolicy.interactiveOffset(
+            from: source,
+            translation: translation,
+            viewportWidth: width
+        )
+        livePageTransition = RootTabLivePageTransition(
+            source: source,
+            destination: destination,
+            viewportWidth: width,
+            offset: offset
+        )
+        livePagePager.update(offset: offset, viewportWidth: width)
+    }
+
+    private func updateLivePageTransition(translation: CGSize) {
+        guard var transition = livePageTransition,
+              !transition.isSettling else { return }
+        let proposed = RootTabSwipePolicy.interactiveOffset(
+            from: transition.source,
+            translation: translation,
+            viewportWidth: transition.viewportWidth
+        )
+        transition.offset = transition.destination.rawValue > transition.source.rawValue
+            ? min(0, proposed) : max(0, proposed)
+        livePageTransition = transition
+        livePagePager.update(
+            offset: transition.offset,
+            viewportWidth: transition.viewportWidth
+        )
+    }
+
+    private func finishLivePageTransition(
+        translation: CGSize,
+        predictedEndTranslation: CGSize
+    ) {
+        guard var transition = livePageTransition,
+              !transition.isSettling else {
+            gestureLifecycle.end()
+            return
+        }
+        let destination = RootTabSwipePolicy.destination(
+            from: transition.source,
+            translation: translation,
+            predictedEndTranslation: predictedEndTranslation
+        )
+        let shouldCommit = destination == transition.destination
+        transition.isSettling = true
+        livePageTransition = transition
+
+        livePagePager.settle(
+            commit: shouldCommit,
+            viewportWidth: transition.viewportWidth
+        ) {
+            if shouldCommit {
+                selectionMutationGate.expect(transition.destination)
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    selectedTab = transition.destination
+                }
+                livePagePager.commitSelection(to: transition.destination)
+            }
+            livePageTransition = nil
+            gestureLifecycle.end()
+        }
+    }
+
+    private func invalidateLivePageTransition() {
+        livePagePager.cancelImmediately()
+        livePageTransition = nil
+        selectionMutationGate.clear()
+        gestureLifecycle.end()
     }
 
     private func beginInteractiveTransition(
