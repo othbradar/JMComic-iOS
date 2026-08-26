@@ -1807,7 +1807,10 @@ extension View {
     }
 }
 
-struct RootView: View {
+/// Preserved temporarily as a compile-time reference while the resident-page
+/// implementation below replaces the old snapshot/live-controller experiments.
+/// Nothing in the app instantiates this view.
+private struct LegacyRootView: View {
     @EnvironmentObject private var appearance: AppAppearanceStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var readerIsPresented = false
@@ -2806,6 +2809,512 @@ struct RootView: View {
 #if DEBUG
         rootTabTransitionLogger.notice("\(message, privacy: .public)")
 #endif
+    }
+}
+
+// MARK: - Resident root pages
+
+/// All five root pages live in this one state object and one SwiftUI hierarchy.
+/// A system tab selection therefore never creates, swaps or reparents a feature
+/// page. It only changes which already-rendered page is visible.
+@MainActor
+private final class RootResidentState: ObservableObject {
+    @Published var selectedTab: RootTab = .explore
+    @Published var readerIsPresented = false
+    @Published var exploreNavigationPath: [AppNavigationRoute] = []
+    @Published var searchNavigationPath: [AppNavigationRoute] = []
+    @Published var downloadsNavigationPath = NavigationPath()
+    @Published var accountNavigationPath: [AppNavigationRoute] = []
+
+    var selectedTabBinding: Binding<RootTab> {
+        Binding(
+            get: { [weak self] in self?.selectedTab ?? .explore },
+            set: { [weak self] in self?.selectedTab = $0 }
+        )
+    }
+
+    var readerPresentationBinding: Binding<Bool> {
+        Binding(
+            get: { [weak self] in self?.readerIsPresented ?? false },
+            set: { [weak self] in self?.readerIsPresented = $0 }
+        )
+    }
+}
+
+private struct RootResidentTransition: Equatable {
+    let token: UUID
+    let source: RootTab
+    let destination: RootTab
+    let viewportWidth: CGFloat
+    var offset: CGFloat
+    var isSettling = false
+}
+
+/// One stable hosting controller owns the real page deck. The native TabView
+/// below still owns iPhone's liquid-glass tab bar and iPad's adaptive top/sidebar
+/// chrome, but its lazily-created tab children are only zero-cost locators.
+///
+/// The host is installed once above UITabBarController's persistent content
+/// transition view. Its layer remains above every placeholder tab child, so a
+/// system selection change can never expose a stale, blank or recycled page.
+@MainActor
+private final class RootResidentPageHostStore: ObservableObject {
+    private var hostingController: UIHostingController<AnyView>?
+    private weak var contentContainer: UIView?
+
+    func install(from locator: UIView, content: AnyView) {
+        guard locator.window != nil,
+              let tabBarController = Self.tabBarController(from: locator) else { return }
+
+        tabBarController.loadViewIfNeeded()
+        guard let selectedController = tabBarController.selectedViewController else { return }
+        selectedController.loadViewIfNeeded()
+        tabBarController.view.layoutIfNeeded()
+
+        guard let selectedView = selectedController.view,
+              let container = Self.persistentContentContainer(
+                for: selectedView,
+                in: tabBarController
+              ) else { return }
+
+        let host: UIHostingController<AnyView>
+        if let hostingController {
+            host = hostingController
+        } else {
+            let created = UIHostingController(rootView: content)
+            created.view.backgroundColor = .clear
+            created.view.clipsToBounds = true
+            created.view.translatesAutoresizingMaskIntoConstraints = true
+            hostingController = created
+            host = created
+        }
+
+        let hostView = host.view!
+        if hostView.superview !== container {
+            hostView.removeFromSuperview()
+            container.addSubview(hostView)
+            contentContainer = container
+        }
+
+        // UIKit may insert a newly-selected placeholder above existing
+        // siblings. A stable layer level inside the content-only transition
+        // container keeps the resident pages visible without covering the
+        // system tab/sidebar chrome, which lives outside this container.
+        hostView.layer.zPosition = 100
+        hostView.frame = container.bounds
+        hostView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        hostView.isHidden = false
+        hostView.setNeedsLayout()
+    }
+
+    private static func persistentContentContainer(
+        for selectedView: UIView,
+        in tabBarController: UITabBarController
+    ) -> UIView? {
+        var candidate = selectedView.superview
+        var highestBelowTabRoot: UIView?
+        while let current = candidate, current !== tabBarController.view {
+            highestBelowTabRoot = current
+            candidate = current.superview
+        }
+
+        // UITabBarController's direct content transition view persists while
+        // its selected child changes. Installing here avoids moving the real
+        // SwiftUI hierarchy between lazy tab controllers.
+        return highestBelowTabRoot ?? selectedView.superview
+    }
+
+    private static func tabBarController(from view: UIView) -> UITabBarController? {
+        var responder: UIResponder? = view
+        while let current = responder {
+            if let controller = current as? UIViewController,
+               let tabBarController = (controller as? UITabBarController)
+                ?? controller.tabBarController {
+                return tabBarController
+            }
+            responder = current.next
+        }
+        return nil
+    }
+}
+
+@MainActor
+private struct RootResidentHostLocator: UIViewRepresentable {
+    let store: RootResidentPageHostStore
+    let content: AnyView
+
+    func makeUIView(context: Context) -> LocatorView {
+        let view = LocatorView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.windowDidChange = { [weak store] locator in
+            store?.install(from: locator, content: content)
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: LocatorView, context: Context) {
+        uiView.windowDidChange = { [weak store] locator in
+            store?.install(from: locator, content: content)
+        }
+        store.install(from: uiView, content: content)
+    }
+
+    final class LocatorView: UIView {
+        var windowDidChange: ((UIView) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            windowDidChange?(self)
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard window != nil else { return }
+            windowDidChange?(self)
+        }
+    }
+}
+
+/// The real five-page pager. Every NavigationStack and every feature-owned
+/// StateObject is constructed exactly once in this non-lazy HStack.
+private struct RootResidentPages: View {
+    @ObservedObject var state: RootResidentState
+    @EnvironmentObject private var appearance: AppAppearanceStore
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var transition: RootResidentTransition?
+    @State private var swipeRegistry = RootTabSwipeRegistry()
+    @State private var gestureLifecycle = RootTabGestureLifecycle()
+
+    var body: some View {
+        GeometryReader { proxy in
+            let pageWidth = max(1, proxy.size.width)
+            let pageHeight = max(1, proxy.size.height)
+
+            ZStack(alignment: .topLeading) {
+                HStack(spacing: 0) {
+                    explorePage
+                        .frame(width: pageWidth, height: pageHeight)
+                    searchPage
+                        .frame(width: pageWidth, height: pageHeight)
+                    favoritesPage
+                        .frame(width: pageWidth, height: pageHeight)
+                    downloadsPage
+                        .frame(width: pageWidth, height: pageHeight)
+                    accountPage
+                        .frame(width: pageWidth, height: pageHeight)
+                }
+                .frame(
+                    width: pageWidth * CGFloat(RootTab.allCases.count),
+                    height: pageHeight,
+                    alignment: .leading
+                )
+                .offset(x: deckOffset(pageWidth: pageWidth))
+            }
+            .frame(width: pageWidth, height: pageHeight, alignment: .topLeading)
+            .contentShape(Rectangle())
+            .clipped()
+            .simultaneousGesture(rootDragGesture(pageWidth: pageWidth))
+            .background {
+                rootTrackpadBridge(pageWidth: pageWidth)
+            }
+        }
+        .background(appearance.background(for: colorScheme).ignoresSafeArea())
+        .environment(\.readerIsPresented, state.readerPresentationBinding)
+        .environment(\.rootTabSelection, state.selectedTabBinding)
+        .environment(\.rootTabSwipeRegistry, swipeRegistry)
+        .onChange(of: state.selectedTab) { oldValue, newValue in
+            guard oldValue != newValue,
+                  let transition,
+                  transition.source != newValue else { return }
+            // A native tab/sidebar tap wins over an unfinished physical drag.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                self.transition = nil
+            }
+            gestureLifecycle.end()
+        }
+    }
+
+    private var explorePage: some View {
+        NavigationStack(path: $state.exploreNavigationPath) {
+            ExploreView()
+                .appNavigationDestinations()
+                .rootTabSwipe(
+                    selection: state.selectedTabBinding,
+                    from: .explore,
+                    isEnabled: RootNavigationPathPolicy.allowsRootTabSwipe(
+                        path: state.exploreNavigationPath
+                    )
+                )
+        }
+    }
+
+    private var searchPage: some View {
+        NavigationStack(path: $state.searchNavigationPath) {
+            SearchView()
+                .appNavigationDestinations()
+                .rootTabSwipe(
+                    selection: state.selectedTabBinding,
+                    from: .search,
+                    isEnabled: RootNavigationPathPolicy.allowsRootTabSwipe(
+                        path: state.searchNavigationPath
+                    )
+                )
+        }
+    }
+
+    private var favoritesPage: some View {
+        FavoritesView()
+    }
+
+    private var downloadsPage: some View {
+        NavigationStack(path: $state.downloadsNavigationPath) {
+            DownloadsView(navigationPath: $state.downloadsNavigationPath)
+                .rootTabSwipe(
+                    selection: state.selectedTabBinding,
+                    from: .downloads,
+                    isEnabled: DownloadsNavigationPolicy.allowsRootTabSwipe(
+                        pathCount: state.downloadsNavigationPath.count
+                    )
+                )
+        }
+    }
+
+    private var accountPage: some View {
+        NavigationStack(path: $state.accountNavigationPath) {
+            AccountView()
+                .appNavigationDestinations()
+                .rootTabSwipe(
+                    selection: state.selectedTabBinding,
+                    from: .account,
+                    isEnabled: RootNavigationPathPolicy.allowsRootTabSwipe(
+                        path: state.accountNavigationPath
+                    )
+                )
+        }
+    }
+
+    private func deckOffset(pageWidth: CGFloat) -> CGFloat {
+        -CGFloat(state.selectedTab.rawValue) * pageWidth
+            + (transition?.offset ?? 0)
+    }
+
+    private func rootDragGesture(pageWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 10, coordinateSpace: .global)
+            .onChanged { value in
+                if transition == nil {
+                    beginTransition(
+                        startLocation: value.startLocation,
+                        translation: value.translation,
+                        pageWidth: pageWidth
+                    )
+                } else {
+                    updateTransition(translation: value.translation)
+                }
+            }
+            .onEnded { value in
+                finishTransition(
+                    translation: value.translation,
+                    predictedEndTranslation: value.predictedEndTranslation
+                )
+            }
+    }
+
+    @ViewBuilder
+    private func rootTrackpadBridge(pageWidth: CGFloat) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            RootTabTrackpadPanBridge(
+                shouldBegin: { startLocation, velocity in
+                    guard !state.readerIsPresented,
+                          transition == nil,
+                          !gestureLifecycle.isActive,
+                          RootTabTrackpadPolicy.isHorizontal(velocity: velocity),
+                          RootTabSwipePolicy.adjacentTab(
+                            from: state.selectedTab,
+                            horizontalTranslation: velocity.x
+                          ) != nil,
+                          activeSwipeSurface(at: startLocation) != nil else { return false }
+                    return true
+                },
+                onChanged: { startLocation, translation in
+                    if transition == nil {
+                        beginTransition(
+                            startLocation: startLocation,
+                            translation: translation,
+                            pageWidth: pageWidth
+                        )
+                    } else {
+                        updateTransition(translation: translation)
+                    }
+                },
+                onEnded: { _, translation, predictedEndTranslation in
+                    finishTransition(
+                        translation: translation,
+                        predictedEndTranslation: predictedEndTranslation
+                    )
+                },
+                onCancelled: {
+                    finishTransition(
+                        translation: .zero,
+                        predictedEndTranslation: .zero
+                    )
+                }
+            )
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+        }
+    }
+
+    private func activeSwipeSurface(at startLocation: CGPoint) -> RootTabSwipeSurface? {
+        swipeRegistry.activeSurface(for: state.selectedTab, at: startLocation)
+    }
+
+    private func beginTransition(
+        startLocation: CGPoint,
+        translation: CGSize,
+        pageWidth: CGFloat
+    ) {
+        guard !state.readerIsPresented,
+              transition == nil,
+              abs(translation.width) >= RootTabSwipePolicy.activationTranslation,
+              abs(translation.width) > abs(translation.height)
+                * RootTabSwipePolicy.horizontalDominance,
+              activeSwipeSurface(at: startLocation) != nil,
+              let destination = RootTabSwipePolicy.adjacentTab(
+                from: state.selectedTab,
+                horizontalTranslation: translation.width
+              ),
+              gestureLifecycle.begin() else { return }
+
+        let source = state.selectedTab
+        let proposed = RootTabSwipePolicy.interactiveOffset(
+            from: source,
+            translation: translation,
+            viewportWidth: pageWidth
+        )
+        let directionalOffset = destination.rawValue > source.rawValue
+            ? min(0, proposed) : max(0, proposed)
+        transition = RootResidentTransition(
+            token: UUID(),
+            source: source,
+            destination: destination,
+            viewportWidth: pageWidth,
+            offset: directionalOffset
+        )
+    }
+
+    private func updateTransition(translation: CGSize) {
+        guard var current = transition, !current.isSettling else { return }
+        let proposed = RootTabSwipePolicy.interactiveOffset(
+            from: current.source,
+            translation: translation,
+            viewportWidth: current.viewportWidth
+        )
+        current.offset = current.destination.rawValue > current.source.rawValue
+            ? min(0, proposed) : max(0, proposed)
+        transition = current
+    }
+
+    private func finishTransition(
+        translation: CGSize,
+        predictedEndTranslation: CGSize
+    ) {
+        guard var current = transition, !current.isSettling else {
+            if transition == nil { gestureLifecycle.end() }
+            return
+        }
+
+        let destination = RootTabSwipePolicy.destination(
+            from: current.source,
+            translation: translation,
+            predictedEndTranslation: predictedEndTranslation
+        )
+        let shouldCommit = destination == current.destination
+        current.isSettling = true
+        transition = current
+
+        let token = current.token
+        let finalOffset: CGFloat
+        if shouldCommit {
+            finalOffset = current.destination.rawValue > current.source.rawValue
+                ? -current.viewportWidth : current.viewportWidth
+        } else {
+            finalOffset = 0
+        }
+
+        withAnimation(
+            .spring(response: 0.30, dampingFraction: 0.90),
+            completionCriteria: .removed
+        ) {
+            guard var settling = transition, settling.token == token else { return }
+            settling.offset = finalOffset
+            transition = settling
+        } completion: {
+            guard let settling = transition, settling.token == token else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                if shouldCommit {
+                    state.selectedTab = settling.destination
+                }
+                transition = nil
+            }
+            gestureLifecycle.end()
+        }
+    }
+}
+
+/// Public app root. Native adaptive tab chrome remains system-owned; feature
+/// pages are rendered by RootResidentPages exactly once in the persistent host.
+struct RootView: View {
+    @EnvironmentObject private var api: APIClient
+    @EnvironmentObject private var downloads: DownloadManager
+    @EnvironmentObject private var readingProgress: ReadingProgressStore
+    @EnvironmentObject private var readingHistory: ReadingHistoryStore
+    @EnvironmentObject private var appearance: AppAppearanceStore
+    @Environment(\.colorScheme) private var colorScheme
+    @StateObject private var state = RootResidentState()
+    @StateObject private var pageHost = RootResidentPageHostStore()
+
+    var body: some View {
+        TabView(selection: $state.selectedTab) {
+            rootTab("发现", systemImage: "sparkles", value: .explore)
+            rootTab("搜索", systemImage: "magnifyingglass", value: .search)
+            rootTab("收藏", systemImage: "heart", value: .favorites)
+            rootTab("下载", systemImage: "arrow.down.circle", value: .downloads)
+            rootTab("我的", systemImage: "person.crop.circle", value: .account)
+        }
+        .tabViewStyle(.sidebarAdaptable)
+        .toolbar(state.readerIsPresented ? .hidden : .visible, for: .tabBar)
+        .tint(.accentColor)
+        .background(appearance.background(for: colorScheme).ignoresSafeArea())
+        .rootTabBarChromeFallback(appearance.background(for: colorScheme))
+    }
+
+    private var residentContent: AnyView {
+        AnyView(
+            RootResidentPages(state: state)
+                .environmentObject(api)
+                .environmentObject(downloads)
+                .environmentObject(readingProgress)
+                .environmentObject(readingHistory)
+                .environmentObject(appearance)
+        )
+    }
+
+    private func rootTab(
+        _ title: String,
+        systemImage: String,
+        value: RootTab
+    ) -> some TabContent<RootTab> {
+        Tab(title, systemImage: systemImage, value: value) {
+            RootResidentHostLocator(store: pageHost, content: residentContent)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(appearance.background(for: colorScheme).ignoresSafeArea())
+        }
     }
 }
 
