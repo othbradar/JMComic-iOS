@@ -1261,20 +1261,25 @@ private final class RootTabLivePagePager {
     private weak var sourceView: UIView?
     private weak var destinationView: UIView?
     private weak var transitionContainer: UIView?
-    private weak var warmupHost: UIView?
     private var sourceFrame: CGRect = .zero
     private var destination: RootTab?
     private var animator: UIViewPropertyAnimator?
     private var prewarmGeneration = 0
+    private var scheduledPrewarmSelection: Int?
+    private var prewarmedSelection: Int?
 
     func attach(to tabBarController: UITabBarController) {
         guard self.tabBarController !== tabBarController else {
-            schedulePrewarm(selectedIndex: tabBarController.selectedIndex)
+            let selectedIndex = tabBarController.selectedIndex
+            if prewarmedSelection != selectedIndex,
+               scheduledPrewarmSelection != selectedIndex {
+                schedulePrewarm(selectedIndex: selectedIndex)
+            }
             return
         }
         cancelImmediately()
-        warmupHost?.removeFromSuperview()
-        warmupHost = nil
+        scheduledPrewarmSelection = nil
+        prewarmedSelection = nil
         self.tabBarController = tabBarController
         preloadPages()
         schedulePrewarm(selectedIndex: tabBarController.selectedIndex)
@@ -1283,7 +1288,8 @@ private final class RootTabLivePagePager {
     func begin(source: RootTab, destination: RootTab) -> CGFloat? {
         guard animator == nil,
               let tabBarController,
-              tabBarController.selectedIndex == source.rawValue else { return nil }
+              tabBarController.selectedIndex == source.rawValue,
+              prewarmedSelection == source.rawValue else { return nil }
         let controllers = rootControllers(in: tabBarController)
         guard controllers.indices.contains(source.rawValue),
               controllers.indices.contains(destination.rawValue) else { return nil }
@@ -1300,11 +1306,14 @@ private final class RootTabLivePagePager {
               sourceView.window != nil,
               sourceView.bounds.width > 1 else { return nil }
 
-        // Inactive root pages live in the off-screen warmup host between
-        // gestures. They have therefore already participated in a real window
-        // render pass and never expose the selected page's stale layer contents
-        // when moved next to the source page.
-        destinationView.removeFromSuperview()
+        // Prewarmed pages are already direct siblings of the selected page.
+        // Keep the destination in the same hierarchy and only change its
+        // transform/z-order. Reparenting an inactive SwiftUI controller view at
+        // gesture start makes Core Animation expose the selected page's stale
+        // backing layer for one frame even though the destination is rendered.
+        guard destinationView.superview === container else { return nil }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         destinationView.frame = sourceView.frame
         destinationView.autoresizingMask = sourceView.autoresizingMask
         destinationView.transform = CGAffineTransform(
@@ -1313,6 +1322,7 @@ private final class RootTabLivePagePager {
             y: 0
         )
         container.insertSubview(destinationView, aboveSubview: sourceView)
+        CATransaction.commit()
 
         self.sourceView = sourceView
         self.destinationView = destinationView
@@ -1383,6 +1393,7 @@ private final class RootTabLivePagePager {
         destinationView?.transform = .identity
         sourceView?.frame = sourceFrame
         clearReferences()
+        prewarmedSelection = nil
         schedulePrewarm(selectedIndex: tab.rawValue)
     }
 
@@ -1396,24 +1407,31 @@ private final class RootTabLivePagePager {
         sourceView?.transform = .identity
         sourceView?.frame = sourceFrame
         destinationView?.transform = .identity
-        returnDestinationToWarmupHost()
+        returnDestinationBelowSource()
         transitionContainer?.setNeedsLayout()
         transitionContainer?.layoutIfNeeded()
         clearReferences()
     }
 
-    private func returnDestinationToWarmupHost() {
+    private func returnDestinationBelowSource() {
         guard let destinationView,
               let sourceView,
-              let host = ensureWarmupHost(below: sourceView) else {
+              let container = sourceView.superview else {
             destinationView?.removeFromSuperview()
             return
         }
-        destinationView.removeFromSuperview()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         destinationView.transform = .identity
-        destinationView.frame = host.bounds
-        destinationView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        host.addSubview(destinationView)
+        destinationView.frame = sourceFrame
+        destinationView.autoresizingMask = sourceView.autoresizingMask
+        if destinationView.superview !== container {
+            destinationView.removeFromSuperview()
+            container.insertSubview(destinationView, belowSubview: sourceView)
+        } else {
+            container.insertSubview(destinationView, belowSubview: sourceView)
+        }
+        CATransaction.commit()
         destinationView.setNeedsLayout()
         destinationView.layoutIfNeeded()
     }
@@ -1431,14 +1449,16 @@ private final class RootTabLivePagePager {
         rootControllers(in: tabBarController).forEach { $0.loadViewIfNeeded() }
     }
 
-    /// Keep every inactive real tab view attached to the same window directly
-    /// underneath the selected, opaque root page. `loadViewIfNeeded()` alone is
-    /// insufficient for SwiftUI: its first layer transaction otherwise happens
-    /// only after a drag has already exposed the adjacent page. The selected
-    /// page fully covers this non-interactive host while all five real pages can
-    /// still participate in window layout and rendering ahead of interaction.
+    /// Keep every inactive real tab view attached to the same content container
+    /// directly underneath the selected, opaque root page. `loadViewIfNeeded()`
+    /// alone is insufficient for SwiftUI: its first layer transaction otherwise
+    /// happens only after a drag has already exposed the adjacent page. Keeping
+    /// the views as direct siblings also avoids reparenting a live layer when a
+    /// physical gesture begins.
     private func schedulePrewarm(selectedIndex: Int) {
+        guard scheduledPrewarmSelection != selectedIndex else { return }
         prewarmGeneration += 1
+        scheduledPrewarmSelection = selectedIndex
         let generation = prewarmGeneration
         DispatchQueue.main.async { [weak self] in
             self?.prewarmInactivePages(
@@ -1465,10 +1485,13 @@ private final class RootTabLivePagePager {
         selectedController.loadViewIfNeeded()
         let selectedView = selectedController.view!
         guard selectedView.window != nil,
-              selectedView.superview != nil,
+              let container = selectedView.superview,
               selectedView.bounds.width > 1,
-              let host = ensureWarmupHost(below: selectedView) else {
-            guard remainingRenderTurns > 0 else { return }
+              selectedView.bounds.height > 1 else {
+            guard remainingRenderTurns > 0 else {
+                scheduledPrewarmSelection = nil
+                return
+            }
             DispatchQueue.main.async { [weak self] in
                 self?.prewarmInactivePages(
                     selectedIndex: selectedIndex,
@@ -1482,61 +1505,39 @@ private final class RootTabLivePagePager {
         for (index, controller) in controllers.enumerated() where index != selectedIndex {
             controller.loadViewIfNeeded()
             let view = controller.view!
+            controller.beginAppearanceTransition(true, animated: false)
             view.transform = .identity
-            if view.superview !== host {
+            if view.superview !== container {
                 view.removeFromSuperview()
-                host.addSubview(view)
+                container.insertSubview(view, belowSubview: selectedView)
+            } else {
+                container.insertSubview(view, belowSubview: selectedView)
             }
-            view.frame = host.bounds
-            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.frame = selectedView.frame
+            view.autoresizingMask = selectedView.autoresizingMask
             view.setNeedsLayout()
             view.layoutIfNeeded()
+            controller.endAppearanceTransition()
+            controller.beginAppearanceTransition(false, animated: false)
+            controller.endAppearanceTransition()
         }
-        host.setNeedsLayout()
-        host.layoutIfNeeded()
+        container.setNeedsLayout()
+        container.layoutIfNeeded()
 
         // Leave the real pages connected for at least one more main render
         // turn. This is not a gesture delay: it happens ahead of interaction
         // and allows SwiftUI/Core Animation to commit their initial contents.
-        guard remainingRenderTurns > 0 else { return }
+        guard remainingRenderTurns > 0 else {
+            prewarmedSelection = selectedIndex
+            scheduledPrewarmSelection = nil
+            return
+        }
         DispatchQueue.main.async { [weak self] in
             self?.prewarmInactivePages(
                 selectedIndex: selectedIndex,
                 generation: generation,
                 remainingRenderTurns: remainingRenderTurns - 1
             )
-        }
-    }
-
-    private func ensureWarmupHost(below selectedView: UIView) -> UIView? {
-        guard let container = selectedView.superview else { return nil }
-        if let warmupHost, warmupHost.superview === container {
-            positionWarmupHost(warmupHost, below: selectedView, in: container)
-            return warmupHost
-        }
-
-        warmupHost?.removeFromSuperview()
-        let host = UIView(frame: .zero)
-        host.backgroundColor = .clear
-        host.isUserInteractionEnabled = false
-        host.clipsToBounds = true
-        host.accessibilityElementsHidden = true
-        container.insertSubview(host, belowSubview: selectedView)
-        positionWarmupHost(host, below: selectedView, in: container)
-        warmupHost = host
-        return host
-    }
-
-    private func positionWarmupHost(
-        _ host: UIView,
-        below selectedView: UIView,
-        in container: UIView
-    ) {
-        guard selectedView.bounds.width > 1, selectedView.bounds.height > 1 else { return }
-        host.frame = selectedView.frame
-        host.autoresizingMask = selectedView.autoresizingMask
-        if host.superview === container {
-            container.insertSubview(host, belowSubview: selectedView)
         }
     }
 
