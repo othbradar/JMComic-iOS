@@ -75,7 +75,7 @@ struct AccountView: View {
         }
         .navigationTitle("我的")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            RootPageTrailingActions {
                 NavigationLink(value: AppNavigationRoute.settings) {
                     Label("设置", systemImage: "gearshape")
                 }

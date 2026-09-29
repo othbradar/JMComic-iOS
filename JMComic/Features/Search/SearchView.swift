@@ -187,7 +187,14 @@ struct SearchView: View {
         }
         .navigationTitle(model.total > 0 ? "搜索 · \(model.total)" : "搜索")
         .appPageBackground()
-        .searchable(text: $query, prompt: "名称、作者、标签或 JM 号")
+        // All five root pages stay alive in the resident deck. Without an
+        // explicit placement, iOS 26 may attach this search field to the
+        // shared bottom tab-bar chrome instead of this page's navigation bar.
+        .searchable(
+            text: $query,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "名称、作者、标签或 JM 号"
+        )
         .onSubmit(of: .search) {
             Task { await performSearch(recordHistory: true) }
         }
@@ -202,7 +209,7 @@ struct SearchView: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            RootPageTrailingActions {
                 Menu {
                     Picker("排序", selection: $model.order) {
                         Text("最新").tag("mr")

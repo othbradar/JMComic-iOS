@@ -2814,6 +2814,69 @@ private struct LegacyRootView: View {
 
 // MARK: - Resident root pages
 
+private struct RootToolbarNeedsInsetKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private extension EnvironmentValues {
+    var rootToolbarNeedsInset: Bool {
+        get { self[RootToolbarNeedsInsetKey.self] }
+        set { self[RootToolbarNeedsInsetKey.self] = newValue }
+    }
+}
+
+/// Keep the visible glass inside the toolbar item's trailing inset. Padding a
+/// system-shared background instead would enlarge the glass itself. This is
+/// local to the resident stack pages; Favorites keeps its native split toolbar.
+struct RootPageTrailingActions<Content: View>: ToolbarContent {
+    @Environment(\.rootToolbarNeedsInset) private var needsInset
+    private let count: Int
+    private let content: Content
+
+    init(count: Int = 1, @ViewBuilder content: () -> Content) {
+        self.count = count
+        self.content = content()
+    }
+
+    var body: some ToolbarContent {
+        if #available(iOS 26.0, *), needsInset {
+            ToolbarItem(placement: .topBarTrailing) {
+                AnyView(
+                    HStack(spacing: 16) {
+                        content
+                    }
+                    // Keep Menu inside the group instead of letting the
+                    // toolbar extract it as a standalone native bar item.
+                    .menuStyle(.button)
+                    .buttonStyle(RootPageToolbarButtonStyle())
+                    .padding(.horizontal, count > 1 ? 4 : 0)
+                    .glassEffect(.regular.interactive(), in: Capsule())
+                    // The native custom-item wrapper supplies the other 4pt.
+                    .padding(.trailing, 16)
+                    .fixedSize()
+                )
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                content
+            }
+        }
+    }
+}
+
+private struct RootPageToolbarButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .labelStyle(.iconOnly)
+            .font(.body.weight(.semibold))
+            .foregroundStyle(.tint)
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.6 : 1)
+    }
+}
+
 /// All five root pages live in this one state object and one SwiftUI hierarchy.
 /// A system tab selection therefore never creates, swaps or reparents a feature
 /// page. It only changes which already-rendered page is visible.
@@ -2859,6 +2922,7 @@ private struct RootResidentTransition: Equatable {
 /// system selection change can never expose a stale, blank or recycled page.
 @MainActor
 private final class RootResidentPageHostStore: ObservableObject {
+    @Published private(set) var contentTopInset: CGFloat = 0
     private var hostingController: UIHostingController<AnyView>?
     private weak var contentContainer: UIView?
 
@@ -2905,6 +2969,21 @@ private final class RootResidentPageHostStore: ObservableObject {
         hostView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         hostView.isHidden = false
         hostView.setNeedsLayout()
+
+        let topInset = selectedView.safeAreaInsets.top
+        if abs(topInset - contentTopInset) > 0.5 {
+            // The resident host deliberately remains a plain overlay view:
+            // making it another UITabBarController child broke NavigationStack
+            // interactive-pop and left the root gesture lifecycle stale after
+            // returning from a detail page. Publish only the reference page's
+            // top geometry; SwiftUI consumes it without changing controller
+            // containment or the proven resident-page transition mechanism.
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      abs(topInset - self.contentTopInset) > 0.5 else { return }
+                self.contentTopInset = topInset
+            }
+        }
     }
 
     private static func persistentContentContainer(
@@ -2977,10 +3056,68 @@ private struct RootResidentHostLocator: UIViewRepresentable {
     }
 }
 
+/// The resident deck is intentionally hosted as a view overlay so changing
+/// the native tab selection can never replace it. That overlay does not inherit
+/// UIKit's usual navigation-bar content margins, leaving large titles flush
+/// against the screen edge. Restore only those visual margins in place; this
+/// bridge neither owns nor reparents a controller and therefore cannot affect
+/// NavigationStack push/pop gestures.
+private struct RootNavigationBarMarginsBridge: UIViewRepresentable {
+    func makeUIView(context: Context) -> MarginView {
+        let view = MarginView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ uiView: MarginView, context: Context) {
+        uiView.scheduleUpdate()
+    }
+
+    final class MarginView: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            scheduleUpdate()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            scheduleUpdate()
+        }
+
+        func scheduleUpdate() {
+            guard window != nil else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                var root: UIView = self
+                while let superview = root.superview { root = superview }
+                Self.updateNavigationBars(in: root)
+            }
+        }
+
+        private static func updateNavigationBars(in view: UIView) {
+            if let navigationBar = view as? UINavigationBar {
+                var margins = navigationBar.directionalLayoutMargins
+                let updatedLeading = max(16, margins.leading)
+                let updatedTrailing = max(16, margins.trailing)
+                if margins.leading != updatedLeading || margins.trailing != updatedTrailing {
+                    margins.leading = updatedLeading
+                    margins.trailing = updatedTrailing
+                    navigationBar.directionalLayoutMargins = margins
+                }
+            }
+            for child in view.subviews {
+                updateNavigationBars(in: child)
+            }
+        }
+    }
+}
+
 /// The real five-page pager. Every NavigationStack and every feature-owned
 /// StateObject is constructed exactly once in this non-lazy HStack.
 private struct RootResidentPages: View {
     @ObservedObject var state: RootResidentState
+    @ObservedObject var pageHost: RootResidentPageHostStore
     @EnvironmentObject private var appearance: AppAppearanceStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var transition: RootResidentTransition?
@@ -3019,6 +3156,12 @@ private struct RootResidentPages: View {
             .background {
                 rootTrackpadBridge(pageWidth: pageWidth)
             }
+        }
+        .padding(.top, pageHost.contentTopInset)
+        .overlay {
+            RootNavigationBarMarginsBridge()
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
         }
         .background(appearance.background(for: colorScheme).ignoresSafeArea())
         .environment(\.readerIsPresented, state.readerPresentationBinding)
@@ -3064,6 +3207,7 @@ private struct RootResidentPages: View {
                     )
                 )
         }
+        .environment(\.rootToolbarNeedsInset, true)
     }
 
     private var favoritesPage: some View {
@@ -3081,6 +3225,7 @@ private struct RootResidentPages: View {
                     )
                 )
         }
+        .environment(\.rootToolbarNeedsInset, true)
     }
 
     private var accountPage: some View {
@@ -3095,6 +3240,7 @@ private struct RootResidentPages: View {
                     )
                 )
         }
+        .environment(\.rootToolbarNeedsInset, true)
     }
 
     private func deckOffset(pageWidth: CGFloat) -> CGFloat {
@@ -3296,7 +3442,7 @@ struct RootView: View {
 
     private var residentContent: AnyView {
         AnyView(
-            RootResidentPages(state: state)
+            RootResidentPages(state: state, pageHost: pageHost)
                 .environmentObject(api)
                 .environmentObject(downloads)
                 .environmentObject(readingProgress)

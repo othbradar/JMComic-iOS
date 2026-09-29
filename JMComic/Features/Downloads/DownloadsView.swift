@@ -114,7 +114,7 @@ struct DownloadsView: View {
             ToolbarItem(placement: .principal) {
                 Text("").accessibilityHidden(true)
             }
-            ToolbarItemGroup(placement: .topBarTrailing) {
+            RootPageTrailingActions(count: 2) {
                 Menu {
                     Picker("离线漫画排序", selection: $selectedSort) {
                         ForEach(OfflineLibrarySort.allCases) { option in
