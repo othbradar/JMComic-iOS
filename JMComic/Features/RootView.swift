@@ -1643,7 +1643,7 @@ private final class RootTabOneShotDisplayLink: NSObject {
 
 /// A zero-sized SwiftUI attachment that installs one scroll-only pan recognizer
 /// on the current app window. `allowedTouchTypes = []` is intentional: screen
-/// touches continue to use the existing SwiftUI DragGesture, while this bridge
+/// touches continue to use the root page's touch gesture, while this bridge
 /// receives only continuous mouse/trackpad scrolling.
 @MainActor
 private struct RootTabTrackpadPanBridge: UIViewRepresentable {
@@ -3113,6 +3113,117 @@ private struct RootNavigationBarMarginsBridge: UIViewRepresentable {
     }
 }
 
+/// Claim a confirmed root swipe before a descendant button can turn its
+/// touch-up into navigation. Unlike a simultaneous SwiftUI DragGesture, this
+/// recognizer cancels the original control touch and does not share with taps.
+/// Vertical scrolling can still recognize alongside it; excluded horizontal
+/// scroll regions and secondary pages reject the root pan before it begins.
+private struct RootTabTouchPanGesture: UIGestureRecognizerRepresentable {
+    let shouldBegin: (CGPoint, CGSize) -> Bool
+    let onChanged: (CGPoint, CGSize) -> Void
+    let onEnded: (CGSize, CGSize) -> Void
+    let onCancelled: () -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator(gesture: self)
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.maximumNumberOfTouches = 1
+        pan.allowedScrollTypesMask = []
+        pan.cancelsTouchesInView = true
+        pan.delaysTouchesBegan = false
+        pan.delegate = context.coordinator
+        pan.name = "JMComic.RootTabTouchPaging"
+        return pan
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        context.coordinator.gesture = self
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        context.coordinator.handle(recognizer)
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var gesture: RootTabTouchPanGesture
+        private var startLocation: CGPoint?
+        private var isTracking = false
+
+        init(gesture: RootTabTouchPanGesture) {
+            self.gesture = gesture
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer,
+                  let window = pan.view?.window else { return false }
+            // Both the start point and displacement use the stationary window,
+            // not a card/page that moves together with the finger.
+            let translation = pan.translation(in: window)
+            let location = pan.location(in: window)
+            let start = CGPoint(x: location.x - translation.x, y: location.y - translation.y)
+            let allowed = gesture.shouldBegin(
+                start, CGSize(width: translation.x, height: translation.y)
+            )
+            startLocation = allowed ? start : nil
+            return allowed
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            guard let scrollView = otherGestureRecognizer.view as? UIScrollView else { return false }
+            return otherGestureRecognizer === scrollView.panGestureRecognizer
+        }
+
+        func handle(_ pan: UIPanGestureRecognizer) {
+            // A disappearing window can cancel an in-flight pan. Release the
+            // transition even when window coordinates are no longer available.
+            if pan.state == .cancelled || pan.state == .failed {
+                cancel()
+                return
+            }
+            guard let window = pan.view?.window else {
+                cancel()
+                return
+            }
+            guard let startLocation else { return }
+            let point = pan.translation(in: window)
+            let translation = CGSize(width: point.x, height: point.y)
+            switch pan.state {
+            case .began, .changed:
+                isTracking = true
+                gesture.onChanged(startLocation, translation)
+            case .ended:
+                let wasTracking = isTracking
+                reset()
+                if wasTracking {
+                    gesture.onEnded(translation, RootTabTrackpadPolicy.predictedEndTranslation(
+                        translation: translation,
+                        velocity: pan.velocity(in: window)
+                    ))
+                }
+            default:
+                break
+            }
+        }
+
+        private func cancel() {
+            let wasTracking = isTracking
+            reset()
+            if wasTracking { gesture.onCancelled() }
+        }
+
+        private func reset() {
+            startLocation = nil
+            isTracking = false
+        }
+    }
+}
+
 /// The real five-page pager. Every NavigationStack and every feature-owned
 /// StateObject is constructed exactly once in this non-lazy HStack.
 private struct RootResidentPages: View {
@@ -3152,7 +3263,7 @@ private struct RootResidentPages: View {
             .frame(width: pageWidth, height: pageHeight, alignment: .topLeading)
             .contentShape(Rectangle())
             .clipped()
-            .simultaneousGesture(rootDragGesture(pageWidth: pageWidth))
+            .gesture(rootDragGesture(pageWidth: pageWidth))
             .background {
                 rootTrackpadBridge(pageWidth: pageWidth)
             }
@@ -3248,25 +3359,41 @@ private struct RootResidentPages: View {
             + (transition?.offset ?? 0)
     }
 
-    private func rootDragGesture(pageWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 10, coordinateSpace: .global)
-            .onChanged { value in
+    private func rootDragGesture(pageWidth: CGFloat) -> RootTabTouchPanGesture {
+        RootTabTouchPanGesture(
+            shouldBegin: { startLocation, translation in
+                !state.readerIsPresented
+                    && transition == nil
+                    && !gestureLifecycle.isActive
+                    && abs(translation.width) > abs(translation.height)
+                        * RootTabSwipePolicy.horizontalDominance
+                    && RootTabSwipePolicy.adjacentTab(
+                        from: state.selectedTab,
+                        horizontalTranslation: translation.width
+                    ) != nil
+                    && activeSwipeSurface(at: startLocation) != nil
+            },
+            onChanged: { startLocation, translation in
                 if transition == nil {
                     beginTransition(
-                        startLocation: value.startLocation,
-                        translation: value.translation,
+                        startLocation: startLocation,
+                        translation: translation,
                         pageWidth: pageWidth
                     )
                 } else {
-                    updateTransition(translation: value.translation)
+                    updateTransition(translation: translation)
                 }
-            }
-            .onEnded { value in
+            },
+            onEnded: { translation, predictedEndTranslation in
                 finishTransition(
-                    translation: value.translation,
-                    predictedEndTranslation: value.predictedEndTranslation
+                    translation: translation,
+                    predictedEndTranslation: predictedEndTranslation
                 )
+            },
+            onCancelled: {
+                finishTransition(translation: .zero, predictedEndTranslation: .zero)
             }
+        )
     }
 
     @ViewBuilder
