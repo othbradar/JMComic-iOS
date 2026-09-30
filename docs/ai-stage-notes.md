@@ -228,3 +228,12 @@ xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobil
 
 - 用户确认本批并明确授权提交、推送、构建 1.0.2 IPA 和发布更新说明。提交前再次核对工作区、暂存区、远端 refs 及现有发布方式；只有本批文件，未暂存其他改动。沿用上文 20 项定向回归和完整 App 验证，本次提交阶段未重复运行测试。
 - 远端 main 位于 `5aa3a29`（v1.0.1），是当前分支祖先；采用快进推送，不切换/重置本地分支。现有发布为 iOS 18+、arm64 未签名 IPA，继续此方式，不使用个人证书或 Provisioning Profile。新版本计划为 1.0.2 / build 23。
+
+### 1.0.2 真机 IPA 构建
+
+- 本地管理提交 `73bc471`，`git push origin HEAD:main` 成功，远端由 `5aa3a29` 快进至该提交。版本源 `project.yml` 与 Xcode 工程同步更新为 1.0.2 / build 23；bundle ID 仍为 `io.github.jmcomic.mobile`。
+- 实际执行 `xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Release -destination 'generic/platform=iOS' -sdk iphoneos -derivedDataPath Artifacts/v1.0.2/DerivedData CODE_SIGNING_ALLOWED=NO build > Artifacts/v1.0.2/build.log 2>&1`，结果 `BUILD SUCCEEDED`。
+- 产物 `/Users/othbradar/PycharmProjects/JMComic-iOS/Artifacts/v1.0.2/DerivedData/Build/Products/Release-iphoneos/JMComic.app`；`lipo -archs` 为 arm64，`vtool -show-build` 为 IOS / minos 18.0 / SDK 26.5。`codesign -dv` 确认未签名，未加入证书或 Provisioning Profile。
+- 使用 `ditto` 复制到 `Artifacts/v1.0.2/package/Payload/JMComic.app`，再以 Python `zipfile.ZipFile(..., 'w', compression=ZIP_DEFLATED, compresslevel=9)` 逐文件打包（不带 AppleDouble / 扩展属性文件）。`testzip()`、plist 版本/平台、主程序可执行权限及全部 7 个包内文件与构建产物字节比对通过。
+- IPA：`/Users/othbradar/PycharmProjects/JMComic-iOS/Artifacts/v1.0.2/JMComic-v1.0.2-iOS18-arm64-UNSIGNED.ipa`，2,418,352 字节，SHA-256 `760ce49983357ff2f35c61617c618913d5924ffaf56bae25528fdb280a32c2ef`。汇总 `Artifacts/v1.0.2/verification.json`；发布说明与校验文件在同目录。该包为真机 iOS 构建，不是 Simulator App。
+- 本次仅版本元数据变化，沿用本批及前三批定向测试/模拟器验证，未重复运行测试；真机安装、身份验证及性能测试未执行。发布说明包含已实现功能、修复、实际过滤/备份/导出限制和未签名安装方式。
