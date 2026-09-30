@@ -237,3 +237,10 @@ xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobil
 - 使用 `ditto` 复制到 `Artifacts/v1.0.2/package/Payload/JMComic.app`，再以 Python `zipfile.ZipFile(..., 'w', compression=ZIP_DEFLATED, compresslevel=9)` 逐文件打包（不带 AppleDouble / 扩展属性文件）。`testzip()`、plist 版本/平台、主程序可执行权限及全部 7 个包内文件与构建产物字节比对通过。
 - IPA：`/Users/othbradar/PycharmProjects/JMComic-iOS/Artifacts/v1.0.2/JMComic-v1.0.2-iOS18-arm64-UNSIGNED.ipa`，2,418,352 字节，SHA-256 `760ce49983357ff2f35c61617c618913d5924ffaf56bae25528fdb280a32c2ef`。汇总 `Artifacts/v1.0.2/verification.json`；发布说明与校验文件在同目录。该包为真机 iOS 构建，不是 Simulator App。
 - 本次仅版本元数据变化，沿用本批及前三批定向测试/模拟器验证，未重复运行测试；真机安装、身份验证及性能测试未执行。发布说明包含已实现功能、修复、实际过滤/备份/导出限制和未签名安装方式。
+
+### 1.0.2 发布结果
+
+- 版本提交 `4c47ad746347ab56c7a116183a4c202c4c66883d` 已通过 `git push origin HEAD:main` 快进推送。执行 `git tag -a v1.0.2 -m 'JMComic 1.0.2 (23)'`、`git push origin refs/tags/v1.0.2` 成功；`git ls-remote origin refs/heads/main refs/tags/v1.0.2 'refs/tags/v1.0.2^{}'` 确认标签指向该版本提交。
+- GitHub CLI 未登录；使用已登录的 Chrome 仓库发布表单选择现有 v1.0.2 标签、填写更新说明、上传上述 IPA 并发布为 Latest。公开发布页：<https://github.com/othbradar/JMComic-iOS/releases/tag/v1.0.2>，发布时间 2026-09-30T07:23:22Z。
+- 实际执行 `curl -fsSL 'https://api.github.com/repos/othbradar/JMComic-iOS/releases/tags/v1.0.2' -o Artifacts/v1.0.2/published-release.json` 及 `/releases/latest` 核验：非草稿、非预发布，Latest 为 v1.0.2；公开正文与本地 `RELEASE_NOTES.md` 标准化换行后完全一致。
+- 附件 ID `600291137`，状态 uploaded；服务器记录大小 2,418,352 字节，digest `sha256:760ce49983357ff2f35c61617c618913d5924ffaf56bae25528fdb280a32c2ef`，均与本地 IPA 一致。下载地址：<https://github.com/othbradar/JMComic-iOS/releases/download/v1.0.2/JMComic-v1.0.2-iOS18-arm64-UNSIGNED.ipa>。仅发布构建包，不含账号、下载内容、测试数据库或个人签名材料。
