@@ -70,3 +70,52 @@ xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobil
 ### 提交授权
 
 - 用户确认“好的现在提交”。提交前核对 HEAD、工作区和暂存区，范围仅为本批 6 个产品源码文件、1 个测试文件及本记录。沿用已完成的构建、测试和模拟器验证，此次未重复运行；只作本地提交，不推送。
+
+## 2026-09-30：根横滑锁轴与阅读焦点缩放
+
+- 基线：`89639e3ff75c3bc73162d8d3e58b3330f08438c0`，分支仍为 `codex/root-tab-resident-pages-v6`；`git status --short --branch` 干净。已核对 README、CONTRIBUTING、project.yml、`xcodebuild -list -project JMComic.xcodeproj` 和 `xcrun simctl list devices booted`。没有 pull、切分支或更改签名配置。
+- 真实入口：`JMComicApp → RootView → RootResidentPages`。`LegacyRootView` 只保留编译参考，没有实例化；未修改其交互实现。确认活动根页的 update/finish 每次重新按纵向位移判轴，且初始方向截断反向位移；连续缩放原来仅改变整列宽度，未保存焦点页内位置；导航栏桥每次调度递归扫描整个窗口。
+- 横滑：UIKit 开始识别时确定水平/拒绝状态，明确纵向与排除区域继续拒绝本次序列；识别后 update 和 finish 使用锁轴语义。取消归零、穿零自然反向，保留现有阈值、弹簧、首尾边界和导航路径限制。动画期间拒绝重复 begin；尺寸/外部 Tab/阅读器状态变化使旧序列失效，旧动画 token 不会覆盖新状态。常驻页面、ViewModel、task 结构保留。
+- 阅读：仍使用现有 SwiftUI ScrollView + LazyVStack、分页 TabView 和原图片加载路径。缩放状态移入局部 surface；每个已实例化页面缓存基准高度，仅在图片/基准宽度变化时更新，外层占位宽高按缩放增长。变换逐页应用，没有整章位图或对裁剪视口整体放大，没有降采样/重编码。捏合更新合并到显示帧；弱引用标记只追踪已实例化页面，以页号、页内归一化坐标和视口焦点补偿 UIKit contentOffset，不逐帧 scrollTo 整页。保留真实滚动范围、横向边界与方向锁。
+- 连续/分页均加入互斥双击和单击：双击 2x/复位；分页与连续共用焦点坐标函数。GestureState 结束/取消清理缩放和平移起点；尺寸变化保留合理页内位置并清理旧尺寸手势起点。导航栏桥移到各导航内容内部，只查自身 responder 祖先，按实例弱缓存 window/controller/bar；同一轮调度合并，边距确有差异才写入，无全局缓存和全窗口递归扫描。
+
+### 本批验证
+
+- 16 项不同的相关 XCTest 最终通过：首轮 14 项；另补真实 SwiftUI 懒布局 1 项；最终补测 3 项（其中新增覆盖既有生命周期测试 1 项）。覆盖横滑后纵向漂移、垂直起始不抢占、排除/取消、穿零反向、首尾、投影阈值、重复 begin；偏心焦点、页起点估算变化、边界、UIKit 取消后平移、尺寸变化；真实懒布局放大后的占位/滚动范围及有限页面实例数。夹具仅为内存中的灰色矩形和彩线，无账号/真实漫画。
+- 懒布局测试前两次失败：未连接 UIWindowScene 的宿主没有实际刷新 SwiftUI 布局，scale 已变但 frame 未变；将测试窗口接入现有场景并显示，第三次及最终复测通过。产品未据此增加重建视图或强制全章布局。首轮、两次失败及修正日志均保留，不以失败记录冒充通过。
+- 日志目录 `Artifacts/gesture-focal/`：`regressions.log/.xcresult`（14 项通过）；`lazy-layout.log/.xcresult`、`lazy-layout-2.log/.xcresult`（失败）；`lazy-layout-3.log/.xcresult`（通过）；`final-targeted.log/.xcresult`（3 项通过）。每份日志开头的 `Command line invocation` 保存实际全部参数和 only-testing 名称；未执行全量测试。
+
+最终定向复测实际命令：
+
+```sh
+xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug \
+  -destination 'platform=iOS Simulator,id=88E155ED-2CC4-4266-8137-148FD7FBB757' \
+  -derivedDataPath build/gesture-focal -resultBundlePath Artifacts/gesture-focal/final-targeted.xcresult \
+  -parallel-testing-enabled NO \
+  -only-testing:JMComicTests/JMComicTests/testContinuousZoomBridgeRetainsOffCenterPagePointAndAllowsPanAfterCancel \
+  -only-testing:JMComicTests/JMComicTests/testLazyContinuousRowsKeepFocalPointAndBaseMeasurementsAcrossZoom \
+  -only-testing:JMComicTests/JMComicTests/testRootTabGestureLifecycleRejectsRepeatedBeginUntilCleanup \
+  CODE_SIGNING_ALLOWED=NO test > Artifacts/gesture-focal/final-targeted.log 2>&1
+```
+
+完整 App 最终构建/安装实际命令：
+
+```sh
+xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath build/gesture-focal-app \
+  CODE_SIGNING_ALLOWED=NO build > Artifacts/gesture-focal/final-build.log 2>&1
+xcrun simctl install 88E155ED-2CC4-4266-8137-148FD7FBB757 build/gesture-focal-app/Build/Products/Debug-iphonesimulator/JMComic.app
+xcrun simctl launch 88E155ED-2CC4-4266-8137-148FD7FBB757 io.github.jmcomic.mobile
+xcrun simctl terminate 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobile
+xcrun simctl install 467D92A6-2187-48A6-BF24-9824B48313B1 build/gesture-focal-app/Build/Products/Debug-iphonesimulator/JMComic.app
+xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobile
+```
+
+- 结果均成功；环境仍为 Xcode 26.6 / iOS 26.5 Simulator。完整产物 `/Users/othbradar/PycharmProjects/JMComic-iOS/build/gesture-focal-app/Build/Products/Debug-iphonesimulator/JMComic.app`。保持 `io.github.jmcomic.mobile`，没有卸载或清数据，已有登录和 iPad 离线章节仍在。通过 `simctl get_app_container … app/data` 定位两端容器，Python hashlib 校验主程序及 debug dylib 均与产物一致，结果在 `installed-product-check.log`。这是 Simulator App，非真机 IPA。构建仅原有 AppIntents metadata 提示，`git diff --check` 通过。
+- CUA 实际观察：iPad 连续/分页阅读均双击 100%→200%→100%，单击显示控件，切换模式仍显示当前章节，旋转与复原可正常显示内容，退出回到原离线章节列表。iPhone 根 Tab 点按、设置 push/按钮返回及 iPad 根页布局已检查。未保存/导出实际阅读内容作为夹具或报告附件。
+- CUA 尝试平移、根 Tab 斜向拖动及系统边缘返回，但未能可靠观察到完整拖动识别；临时诊断也未捕获根 pan 开始事件，诊断已移除。工具未提供多指轨迹/持续按键能力。因此这些 UI 拖动项目、偏心捏合、多次反向、动画中重触、iPad 实际分屏 **未完成自动化验证，待人工检查**；不能用上述坐标和生命周期测试代替手感验收。真机帧率/掉帧、触控与妙控触控板手感 **未执行**；没有运行 Instruments。
+- 本批仅修改 RootView、ReaderView、现有测试及本记录。未提交、未推送，等待完整 App 人工检查。
+
+### 本批提交授权
+
+- 用户确认“提交”。提交前再次核对 HEAD、工作区与暂存区，只有本批上述 4 个文件；沿用已记录的验证结果与人工检查限制，此次未重复测试。仅作本地提交，不推送。

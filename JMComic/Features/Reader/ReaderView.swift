@@ -53,6 +53,44 @@ enum ReaderInteractionPolicy {
     }
 }
 
+/// All focal coordinates are in the stationary viewport, never in a view
+/// that is itself moving/scaling. Continuous rows additionally retain a page
+/// identity and normalized point, so lazy height estimates cannot move focus.
+enum ReaderZoomGeometry {
+    static func normalizedPoint(_ point: CGPoint, in frame: CGRect) -> CGPoint {
+        CGPoint(x: (point.x - frame.minX) / max(1, frame.width),
+                y: (point.y - frame.minY) / max(1, frame.height))
+    }
+
+    static func point(_ normalized: CGPoint, in frame: CGRect) -> CGPoint {
+        CGPoint(x: frame.minX + normalized.x * frame.width,
+                y: frame.minY + normalized.y * frame.height)
+    }
+
+    static func focalOffset(focus: CGPoint, initialOffset: CGSize, ratio: CGFloat) -> CGSize {
+        CGSize(width: focus.x - (focus.x - initialOffset.width) * ratio,
+               height: focus.y - (focus.y - initialOffset.height) * ratio)
+    }
+
+    static func clampedOffset(_ offset: CGSize, scale: CGFloat, viewport: CGSize) -> CGSize {
+        let x = max(0, viewport.width * (scale - 1) / 2)
+        let y = max(0, viewport.height * (scale - 1) / 2)
+        return CGSize(width: min(max(offset.width, -x), x),
+                      height: min(max(offset.height, -y), y))
+    }
+
+    static func scrollOffset(pageFrame: CGRect, point: CGPoint, focus: CGPoint,
+                             contentSize: CGSize, viewport: CGSize, insets: UIEdgeInsets) -> CGPoint {
+        let target = self.point(point, in: pageFrame)
+        return CGPoint(
+            x: min(max(target.x - focus.x, -insets.left),
+                   max(-insets.left, contentSize.width - viewport.width + insets.right)),
+            y: min(max(target.y - focus.y, -insets.top),
+                   max(-insets.top, contentSize.height - viewport.height + insets.bottom))
+        )
+    }
+}
+
 /// 统一的阅读器入口。在 iPad 上从多列导航中 push Reader 只会替换详情列，
 /// fullScreenCover 则会覆盖整个应用窗口，包括根 TabView 与收藏夹侧栏。
 struct ReaderPresentationLink<Label: View>: View {
@@ -157,14 +195,7 @@ struct ReaderView: View {
     @State private var localURLs: [URL] = []
     @State private var mode: ReaderMode = .vertical
     @State private var currentPage = 0
-    @State private var continuousScrollPosition: Int?
-    @State private var continuousPageTrackingEnabled = false
-    @State private var pendingContinuousRestorePage: Int?
-    @State private var pendingRestorePageIsVisible = false
     @State private var error: String?
-    @State private var continuousZoomScale: CGFloat = 1
-    @State private var continuousMagnificationStartScale: CGFloat = 1
-    @State private var continuousMagnificationIsActive = false
     @Binding private var controlsVisible: Bool
     @Binding private var pageIsZoomed: Bool
 
@@ -225,22 +256,13 @@ struct ReaderView: View {
         .preferredColorScheme(.dark)
         .onAppear { readerIsPresented.wrappedValue = true }
         .onDisappear {
-            resetContinuousZoom()
             pageIsZoomed = false
             progressStore.flush()
             readerIsPresented.wrappedValue = false
         }
         .task(id: chapter.id) { await load() }
         .onChange(of: mode) { _, _ in
-            resetContinuousZoom()
             pageIsZoomed = false
-            // A newly-created continuous ScrollView briefly reports its
-            // default position before we restore the saved/current page.
-            // Ignore that transient value so it cannot overwrite progress.
-            continuousPageTrackingEnabled = false
-            continuousScrollPosition = nil
-            pendingContinuousRestorePage = nil
-            pendingRestorePageIsVisible = false
         }
         .onChange(of: currentPage) { _, value in
             progressStore.update(comicID: comic.id, chapterID: chapter.id, pageIndex: value)
@@ -254,87 +276,19 @@ struct ReaderView: View {
     @ViewBuilder
     private func readerContent<Page: View>(@ViewBuilder page: @escaping (Int) -> Page) -> some View {
         if mode == .vertical {
-            GeometryReader { geometry in
-                // Keep UIKit's scroll axes stable for the complete lifetime of
-                // one pinch. Rebuilding the underlying scroll view as scale
-                // crosses 1.01 cancels gestures and jumps content offsets.
-                ScrollView([.vertical, .horizontal]) {
-                    LazyVStack(spacing: 0) {
-                        ForEach(0..<pageCount, id: \.self) { index in
-                            page(index)
-                                .id(index)
-                        }
-                    }
-                    .scrollTargetLayout()
-                    // The width participates in layout, so ScrollView's
-                    // contentSize grows with the complete chapter. Every
-                    // neighboring page remains reachable after zooming.
-                    .frame(width: ReaderInteractionPolicy.continuousContentWidth(
-                        viewportWidth: geometry.size.width,
-                        scale: continuousZoomScale
-                    ))
-                    .frame(minWidth: max(1, geometry.size.width), alignment: .center)
-                    // Keep a handle to the actual UIKit scroll view. SwiftUI
-                    // does not expose directional locking, which is needed
-                    // after zooming so a mostly vertical drag cannot make
-                    // the complete chapter drift left and right.
-                    .background {
-                        ReaderScrollDirectionConfigurator(
-                            horizontalScrollingEnabled:
-                                ReaderInteractionPolicy.continuousHorizontalScrollingEnabled(
-                                    scale: continuousZoomScale
-                                )
-                        )
-                        .frame(width: 0, height: 0)
-                    }
-                }
-                // Track the page at the viewport's main (center) anchor.
-                // Unlike per-row onAppear, this is not fired merely because
-                // LazyVStack preloaded a neighboring image.
-                .scrollPosition(id: $continuousScrollPosition, anchor: .center)
-                .scrollIndicators(.hidden)
-                // At 100% the content width equals the viewport and UIKit's
-                // configurator disables horizontal bounce and normalises x.
-                // After zooming the wider chapter pans on both axes normally.
-                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-                .simultaneousGesture(continuousMagnifyGesture)
-                .onTapGesture { withAnimation { controlsVisible.toggle() } }
-                .task(id: "\(chapter.id)|\(pageCount)|\(mode.rawValue)") {
-                    guard pageCount > 0 else { return }
-                    continuousPageTrackingEnabled = false
-                    let restoredPage = restoredPageIndex()
-                    pendingContinuousRestorePage = restoredPage
-                    pendingRestorePageIsVisible = false
-                    currentPage = restoredPage
-                    continuousScrollPosition = restoredPage
-                }
-                .onScrollTargetVisibilityChange(
-                    idType: Int.self,
-                    threshold: 0.01
-                ) { visiblePages in
-                    guard let restoredPage = pendingContinuousRestorePage else { return }
-                    pendingRestorePageIsVisible = visiblePages.contains(restoredPage)
-                    enableContinuousPageTrackingIfRestored(restoredPage)
-                }
-                .onChange(of: continuousScrollPosition) { _, visiblePage in
-                    if let restoredPage = pendingContinuousRestorePage {
-                        guard visiblePage == restoredPage else { return }
-                        enableContinuousPageTrackingIfRestored(restoredPage)
-                        return
-                    }
-                    guard continuousPageTrackingEnabled,
-                          let visiblePage,
-                          visiblePage >= 0,
-                          visiblePage < pageCount,
-                          visiblePage != currentPage else { return }
-                    currentPage = visiblePage
-                }
-                .accessibilityLabel("连续漫画阅读区")
-                .accessibilityValue("缩放 \(Int(continuousZoomScale * 100))%")
-            }
+            ContinuousReaderSurface(
+                pageCount: pageCount,
+                currentPage: $currentPage,
+                isZoomed: $pageIsZoomed,
+                onSingleTap: { withAnimation { controlsVisible.toggle() } },
+                page: page
+            )
             .id(ReaderMode.vertical)
         } else {
-            ZoomableReaderSurface(isZoomed: $pageIsZoomed) {
+            ZoomableReaderSurface(
+                isZoomed: $pageIsZoomed,
+                onSingleTap: { withAnimation { controlsVisible.toggle() } }
+            ) {
                 TabView(selection: $currentPage) {
                     ForEach(0..<pageCount, id: \.self) { index in
                         page(index).tag(index)
@@ -343,36 +297,9 @@ struct ReaderView: View {
                 .tabViewStyle(.page(indexDisplayMode: .never))
                 // 避免放大态拖动整页时误切到上/下一页。
                 .scrollDisabled(pageIsZoomed)
-                .onTapGesture { withAnimation { controlsVisible.toggle() } }
             }
             .id(ReaderMode.paged)
         }
-    }
-
-    private var continuousMagnifyGesture: some Gesture {
-        MagnifyGesture(minimumScaleDelta: 0.01)
-            .onChanged { value in
-                if !continuousMagnificationIsActive {
-                    continuousMagnificationIsActive = true
-                    continuousMagnificationStartScale = continuousZoomScale
-                }
-                continuousZoomScale = ReaderInteractionPolicy.clampedZoomScale(
-                    continuousMagnificationStartScale * value.magnification
-                )
-                pageIsZoomed = continuousZoomScale > 1.01
-            }
-            .onEnded { _ in
-                continuousMagnificationIsActive = false
-                if continuousZoomScale <= 1.01 {
-                    resetContinuousZoom()
-                }
-            }
-    }
-
-    private func resetContinuousZoom() {
-        continuousZoomScale = 1
-        continuousMagnificationStartScale = 1
-        continuousMagnificationIsActive = false
     }
 
     private func load() async {
@@ -408,148 +335,410 @@ struct ReaderView: View {
         return min(saved.pageIndex, max(0, pageCount - 1))
     }
 
-    private func enableContinuousPageTrackingIfRestored(_ restoredPage: Int) {
-        guard pendingRestorePageIsVisible,
-              continuousScrollPosition == restoredPage else { return }
-        pendingContinuousRestorePage = nil
-        continuousPageTrackingEnabled = true
+}
+
+/// The chapter remains lazy and scrolls using SwiftUI's existing UIScrollView.
+/// Scale is local to this surface; changing it doesn't rebuild ReaderView's
+/// toolbar, progress observers or image request inputs.
+private struct ContinuousReaderSurface<Page: View>: View {
+    let pageCount: Int
+    @Binding var currentPage: Int
+    @Binding var isZoomed: Bool
+    let onSingleTap: () -> Void
+    let page: (Int) -> Page
+    @StateObject private var zoom = ReaderContinuousZoomController()
+    @State private var scrollPosition: Int?
+    @State private var pendingRestore: Int?
+    @State private var restoredPageVisible = false
+    @State private var trackingEnabled = false
+    @GestureState private var magnifying = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            ScrollView([.vertical, .horizontal]) {
+                LazyVStack(spacing: 0) {
+                    ForEach(0..<pageCount, id: \.self) { index in
+                        ReaderContinuousRow(
+                            baseWidth: ReaderInteractionPolicy.continuousContentWidth(
+                                viewportWidth: geometry.size.width, scale: 1
+                            ),
+                            scale: zoom.scale,
+                            index: index,
+                            zoom: zoom,
+                            content: page(index)
+                        )
+                        .id(index)
+                    }
+                }
+                .scrollTargetLayout()
+                .frame(width: ReaderInteractionPolicy.continuousContentWidth(
+                    viewportWidth: geometry.size.width, scale: zoom.scale
+                ))
+                .frame(minWidth: max(1, geometry.size.width), alignment: .center)
+            }
+            .scrollPosition(id: $scrollPosition, anchor: .center)
+            .scrollIndicators(.hidden)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .simultaneousGesture(continuousMagnifyGesture)
+            .gesture(
+                SpatialTapGesture(count: 2).exclusively(before: SpatialTapGesture(count: 1))
+                    .onEnded { value in
+                        switch value {
+                        case .first(let tap): zoom.doubleTap(at: tap.location)
+                        case .second: onSingleTap()
+                        }
+                    }
+            )
+            .onScrollGeometryChange(for: CGPoint.self) { $0.contentOffset } action: { _, _ in
+                zoom.didScroll()
+            }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                zoom.viewportChanged(to: size)
+            }
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting { zoom.beginPan() }
+            }
+            .task(id: pageCount) {
+                guard pageCount > 0 else { return }
+                trackingEnabled = false
+                let restored = min(currentPage, pageCount - 1)
+                pendingRestore = restored
+                restoredPageVisible = false
+                scrollPosition = restored
+            }
+            .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.01) { visible in
+                guard let restored = pendingRestore else { return }
+                restoredPageVisible = visible.contains(restored)
+                enableTrackingIfRestored()
+            }
+            .onChange(of: scrollPosition) { _, visible in
+                if pendingRestore != nil {
+                    enableTrackingIfRestored()
+                } else if trackingEnabled, !zoom.isAdjustingFocus,
+                          let visible, (0..<pageCount).contains(visible) {
+                    currentPage = visible
+                }
+            }
+            .onChange(of: zoom.scale > ReaderInteractionPolicy.continuousHorizontalActivationScale) { _, value in
+                isZoomed = value
+            }
+            .onChange(of: magnifying) { _, value in
+                // GestureState also resets on cancellation (onEnded needn't run).
+                if !value { zoom.endPinch() }
+            }
+            .onDisappear {
+                zoom.detach()
+                isZoomed = false
+            }
+            .accessibilityLabel("连续漫画阅读区")
+            .accessibilityValue("缩放 \(Int(zoom.scale * 100))%")
+        }
+    }
+
+    private var continuousMagnifyGesture: some Gesture {
+        MagnifyGesture(minimumScaleDelta: 0.01)
+            .updating($magnifying) { _, state, _ in state = true }
+            .onChanged { value in
+                zoom.pinch(magnification: value.magnification, focus: value.startLocation)
+            }
+            .onEnded { _ in zoom.endPinch() }
+    }
+
+    private func enableTrackingIfRestored() {
+        guard let restored = pendingRestore, restoredPageVisible,
+              scrollPosition == restored else { return }
+        pendingRestore = nil
+        trackingEnabled = true
     }
 }
 
-/// Configures the `UIScrollView` owned by SwiftUI's continuous reader without
-/// replacing it with a second scrolling implementation. Keeping SwiftUI in
-/// charge preserves LazyVStack recycling, ScrollViewReader restoration and
-/// trackpad/touch pinch handling, while UIKit's directional lock removes the
-/// diagonal drift that is especially noticeable on wide, zoomed pages.
-private struct ReaderScrollDirectionConfigurator: UIViewRepresentable {
-    let horizontalScrollingEnabled: Bool
+/// Measure the unscaled page only when its image or base width changes. The
+/// occupied height/width still grow at every zoom step, keeping scroll range,
+/// neighboring pages and LazyVStack virtualization correct. No chapter bitmap,
+/// downsampling, drawingGroup or transform of a clipped viewport is involved.
+struct ReaderContinuousRow<Content: View>: View {
+    let baseWidth: CGFloat
+    let scale: CGFloat
+    let index: Int
+    let zoom: ReaderContinuousZoomController
+    let content: Content
+    @State private var baseHeight: CGFloat?
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
+    var body: some View {
+        content
+            .frame(width: baseWidth)
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                if height > 0, baseHeight != height { baseHeight = height }
+            }
+            .scaleEffect(scale, anchor: .topLeading)
+            .frame(width: baseWidth * scale, height: baseHeight.map { $0 * scale }, alignment: .topLeading)
+            .background { ReaderPageGeometryMarker(index: index, zoom: zoom) }
+    }
+}
+
+struct ReaderPageGeometryMarker: UIViewRepresentable {
+    let index: Int
+    let zoom: ReaderContinuousZoomController
+
+    func makeUIView(context: Context) -> Marker {
+        let view = Marker()
+        view.isUserInteractionEnabled = false
+        view.index = index
+        view.zoom = zoom
+        return view
     }
 
-    func makeUIView(context: Context) -> HierarchyMarkerView {
-        let marker = HierarchyMarkerView(frame: .zero)
-        marker.isUserInteractionEnabled = false
-        marker.backgroundColor = .clear
-        marker.hierarchyDidChange = { [weak marker, weak coordinator = context.coordinator] in
-            guard let marker else { return }
-            coordinator?.hierarchyDidChange(from: marker)
-        }
-        context.coordinator.update(
-            horizontalScrollingEnabled: horizontalScrollingEnabled,
-            from: marker
-        )
-        return marker
+    func updateUIView(_ view: Marker, context: Context) {
+        view.zoom = zoom
+        zoom.register(view)
     }
 
-    func updateUIView(_ marker: HierarchyMarkerView, context: Context) {
-        context.coordinator.update(
-            horizontalScrollingEnabled: horizontalScrollingEnabled,
-            from: marker
-        )
+    static func dismantleUIView(_ view: Marker, coordinator: ()) {
+        view.zoom?.unregister(view)
     }
 
-    final class HierarchyMarkerView: UIView {
-        var hierarchyDidChange: (() -> Void)?
-
-        override func didMoveToSuperview() {
-            super.didMoveToSuperview()
-            hierarchyDidChange?()
-        }
-
+    final class Marker: UIView {
+        var index = 0
+        weak var zoom: ReaderContinuousZoomController?
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            hierarchyDidChange?()
+            if window != nil { zoom?.register(self) }
+        }
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            zoom?.geometryChanged()
+        }
+    }
+}
+
+@MainActor
+final class ReaderContinuousZoomController: NSObject, ObservableObject {
+    @Published private(set) var scale: CGFloat = 1
+    private struct Row {
+        weak var view: UIView?
+        var frame: CGRect
+    }
+    private struct Anchor {
+        let index: Int
+        let point: CGPoint
+        var focus: CGPoint
+    }
+    private var rows: [Int: Row] = [:] // Only instantiated lazy rows, no chapter cache.
+    private weak var scrollView: UIScrollView?
+    private var oldMaximumTouches: Int?
+    private var viewport = CGSize.zero
+    private var anchor: Anchor?
+    private var restingAnchor: Anchor?
+    private var startScale: CGFloat?
+    private var pendingScale: CGFloat?
+    private var animation: (start: CGFloat, end: CGFloat, time: CFTimeInterval)?
+    private var displayLink: CADisplayLink?
+    private var frameTarget: ReaderZoomFrameTarget?
+    private var adjustmentScheduled = false
+    private var finishAfterLayout = false
+    private(set) var isAdjustingFocus = false
+
+    func register(_ marker: ReaderPageGeometryMarker.Marker) {
+        if scrollView == nil || marker.window !== scrollView?.window {
+            var parent = marker.superview
+            while let view = parent, !(view is UIScrollView) { parent = view.superview }
+            if let scroll = parent as? UIScrollView {
+                scrollView = scroll
+                oldMaximumTouches = scroll.panGestureRecognizer.maximumNumberOfTouches
+                scroll.panGestureRecognizer.maximumNumberOfTouches = 1
+                scroll.alwaysBounceHorizontal = false
+                scroll.isDirectionalLockEnabled = true
+            }
+        }
+        guard let scrollView, marker.isDescendant(of: scrollView) else { return }
+        rows[marker.index] = Row(view: marker, frame: marker.convert(marker.bounds, to: scrollView))
+        geometryChanged()
+    }
+
+    func unregister(_ marker: ReaderPageGeometryMarker.Marker) {
+        if rows[marker.index]?.view === marker { rows.removeValue(forKey: marker.index) }
+    }
+
+    func pinch(magnification: CGFloat, focus: CGPoint) {
+        if startScale == nil {
+            stopFrames()
+            refreshFrames()
+            anchor = capture(at: focus)
+            guard anchor != nil else { return }
+            startScale = scale
+            isAdjustingFocus = true
+            finishAfterLayout = false
+        }
+        pendingScale = ReaderInteractionPolicy.clampedZoomScale((startScale ?? scale) * magnification)
+        scheduleFrame()
+    }
+
+    func endPinch() {
+        guard startScale != nil else { return }
+        if let pendingScale { scale = pendingScale }
+        if scale <= ReaderInteractionPolicy.continuousHorizontalActivationScale { scale = 1 }
+        stopFrames()
+        startScale = nil
+        finishAfterLayout = true
+        geometryChanged()
+    }
+
+    func doubleTap(at focus: CGPoint) {
+        guard startScale == nil else { return }
+        stopFrames()
+        refreshFrames()
+        anchor = capture(at: focus)
+        guard anchor != nil else { return }
+        isAdjustingFocus = true
+        finishAfterLayout = false
+        animation = (scale, scale > 1.01 ? 1 : 2, CACurrentMediaTime())
+        scheduleFrame()
+    }
+
+    func beginPan() {
+        guard startScale == nil else { return }
+        stopFrames()
+        anchor = nil
+        finishAfterLayout = false
+        isAdjustingFocus = false
+    }
+
+    func didScroll() {
+        guard !isAdjustingFocus else { return }
+        refreshFrames()
+        restingAnchor = capture(at: CGPoint(x: viewport.width / 2, y: viewport.height / 2))
+    }
+
+    func viewportChanged(to size: CGSize) {
+        guard size != viewport, size.width > 0, size.height > 0 else { return }
+        let old = viewport
+        viewport = size
+        guard old != .zero else { return }
+        // Use the previously observed page coordinate, before new width/height
+        // estimates arrive. Rotation also terminates the old pinch coordinate space.
+        let retained = isAdjustingFocus ? anchor : restingAnchor
+        stopFrames()
+        startScale = nil
+        if var retained {
+            retained.focus = CGPoint(x: size.width / 2, y: size.height / 2)
+            anchor = retained
+            isAdjustingFocus = true
+            finishAfterLayout = true
+            geometryChanged()
         }
     }
 
-    @MainActor
-    final class Coordinator: NSObject {
-        private var horizontalScrollingEnabled = false
-        private var lastAppliedHorizontalScrollingEnabled: Bool?
-        private weak var cachedScrollView: UIScrollView?
-        private weak var cachedWindow: UIWindow?
-        private var isConfigurationScheduled = false
-
-        func update(horizontalScrollingEnabled: Bool, from marker: UIView) {
-            let valueChanged = self.horizontalScrollingEnabled != horizontalScrollingEnabled
-            self.horizontalScrollingEnabled = horizontalScrollingEnabled
-            guard valueChanged || !cacheIsValid(for: marker) else { return }
-            scheduleConfiguration(from: marker)
-        }
-
-        func hierarchyDidChange(from marker: UIView) {
-            cachedScrollView = nil
-            cachedWindow = nil
-            lastAppliedHorizontalScrollingEnabled = nil
-            scheduleConfiguration(from: marker)
-        }
-
-        private func scheduleConfiguration(from marker: UIView) {
-            guard !isConfigurationScheduled else { return }
-            isConfigurationScheduled = true
-            // The representable can be updated before SwiftUI has inserted it
-            // into the scroll view's hosting hierarchy. Deferring one run-loop
-            // turn covers initial insertion while coalescing rapid scale updates.
-            DispatchQueue.main.async { [weak self, weak marker] in
-                guard let self else { return }
-                self.isConfigurationScheduled = false
-                guard let marker else { return }
-                self.configureNearestScrollView(from: marker)
-            }
-        }
-
-        private func configureNearestScrollView(from marker: UIView) {
-            let scrollView: UIScrollView
-            let isNewScrollView: Bool
-            if cacheIsValid(for: marker), let cachedScrollView {
-                scrollView = cachedScrollView
-                isNewScrollView = false
-            } else {
-                var ancestor = marker.superview
-                while let view = ancestor, !(view is UIScrollView) {
-                    ancestor = view.superview
-                }
-                guard let found = ancestor as? UIScrollView else { return }
-                scrollView = found
-                cachedScrollView = found
-                cachedWindow = marker.window
-                lastAppliedHorizontalScrollingEnabled = nil
-                isNewScrollView = true
-            }
-
-            // `alwaysBounceHorizontal = false` still permits horizontal
-            // scrolling whenever zoom makes contentSize wider than bounds; it
-            // only removes the empty rubber-band movement at natural size.
-            if isNewScrollView {
-                scrollView.alwaysBounceHorizontal = false
-                scrollView.showsHorizontalScrollIndicator = false
-                scrollView.isDirectionalLockEnabled = true
-            }
-
-            let shouldResetHorizontalOffset = !horizontalScrollingEnabled
-                && (isNewScrollView || lastAppliedHorizontalScrollingEnabled == true)
-            if shouldResetHorizontalOffset {
-                let restingX = -scrollView.adjustedContentInset.left
-                if abs(scrollView.contentOffset.x - restingX) > 0.5 {
-                    scrollView.setContentOffset(
-                        CGPoint(x: restingX, y: scrollView.contentOffset.y),
-                        animated: false
-                    )
-                }
-            }
-            lastAppliedHorizontalScrollingEnabled = horizontalScrollingEnabled
-        }
-
-        private func cacheIsValid(for marker: UIView) -> Bool {
-            guard let scrollView = cachedScrollView,
-                  let markerWindow = marker.window,
-                  cachedWindow === markerWindow,
-                  scrollView.window === markerWindow else { return false }
-            return marker.isDescendant(of: scrollView)
+    func geometryChanged() {
+        guard !adjustmentScheduled else { return }
+        adjustmentScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.adjustmentScheduled = false
+            self.adjustFocus()
         }
     }
+
+    private func refreshFrames() {
+        guard let scrollView else { return }
+        rows = rows.filter { $0.value.view?.window != nil }
+        for (index, row) in rows {
+            guard let view = row.view else { continue }
+            rows[index]?.frame = view.convert(view.bounds, to: scrollView)
+        }
+    }
+
+    private func capture(at focus: CGPoint) -> Anchor? {
+        guard let scrollView else { return nil }
+        let point = CGPoint(x: scrollView.contentOffset.x + focus.x,
+                            y: scrollView.contentOffset.y + focus.y)
+        let nearest = rows.filter { $0.value.frame.height > 0 }.min {
+            distance(point.y, from: $0.value.frame) < distance(point.y, from: $1.value.frame)
+        }
+        guard let (index, row) = nearest else { return nil }
+        return Anchor(index: index, point: ReaderZoomGeometry.normalizedPoint(point, in: row.frame), focus: focus)
+    }
+
+    private func distance(_ y: CGFloat, from frame: CGRect) -> CGFloat {
+        max(frame.minY - y, y - frame.maxY, 0)
+    }
+
+    private func adjustFocus() {
+        guard let scrollView else { return }
+        refreshFrames()
+        if let anchor, let row = rows[anchor.index] {
+            let offset = ReaderZoomGeometry.scrollOffset(
+                pageFrame: row.frame, point: anchor.point, focus: anchor.focus,
+                contentSize: scrollView.contentSize, viewport: scrollView.bounds.size,
+                insets: scrollView.adjustedContentInset
+            )
+            if abs(offset.x - scrollView.contentOffset.x) > 0.25
+                || abs(offset.y - scrollView.contentOffset.y) > 0.25 {
+                scrollView.setContentOffset(offset, animated: false)
+            }
+        }
+        if finishAfterLayout {
+            finishAfterLayout = false
+            isAdjustingFocus = false
+            // Keep the page anchor through final lazy layout corrections. A new
+            // pan drops it immediately, so normal scrolling never fights it.
+        }
+        if !isAdjustingFocus { didScroll() }
+    }
+
+    private func scheduleFrame() {
+        guard displayLink == nil else { return }
+        let target = ReaderZoomFrameTarget { [weak self] in self?.frame() }
+        frameTarget = target
+        let link = CADisplayLink(target: target, selector: #selector(ReaderZoomFrameTarget.tick))
+        displayLink = link
+        link.add(to: .main, forMode: .common)
+    }
+
+    private func frame() {
+        if let animation {
+            let t = min(1, (CACurrentMediaTime() - animation.time) / 0.26)
+            let eased = t * t * (3 - 2 * t)
+            scale = animation.start + (animation.end - animation.start) * eased
+            if t >= 1 {
+                stopFrames()
+                finishAfterLayout = true
+            }
+            geometryChanged()
+        } else if let pendingScale {
+            if scale != pendingScale { scale = pendingScale }
+            self.pendingScale = nil
+            geometryChanged()
+        } else if startScale == nil {
+            stopFrames()
+        }
+    }
+
+    private func stopFrames() {
+        displayLink?.invalidate()
+        displayLink = nil
+        frameTarget = nil
+        pendingScale = nil
+        animation = nil
+    }
+
+    deinit { displayLink?.invalidate() }
+
+    func detach() {
+        stopFrames()
+        if let oldMaximumTouches { scrollView?.panGestureRecognizer.maximumNumberOfTouches = oldMaximumTouches }
+        scrollView = nil
+        rows.removeAll()
+        anchor = nil
+        restingAnchor = nil
+        startScale = nil
+    }
+}
+
+private final class ReaderZoomFrameTarget: NSObject {
+    let action: () -> Void
+    init(_ action: @escaping () -> Void) { self.action = action }
+    @objc func tick() { action() }
 }
 
 private struct OnlinePageView: View {
@@ -646,8 +835,8 @@ private struct LocalPageView: View {
     }
 }
 
-/// 图片本身不再单独缩放或裁剪。连续模式通过整条 LazyVStack 的真实
-/// 布局宽度放大，分页模式变换整个 TabView，因此相邻页不会盖住当前图。
+/// Keep the decoded image at full quality. Continuous rows measure this once
+/// at the base width; their explicit outer frames reserve the scaled height.
 private struct ReaderPageImage: View {
     let image: UIImage
 
@@ -664,118 +853,127 @@ private struct ReaderPageImage: View {
 /// 触屏双指与妙控键盘/触控板缩放；它变换整个分页容器，而不是单图。
 /// 连续阅读不能使用视觉 transform，因为那会先裁掉 ScrollView 视口外
 /// 的章节内容；连续模式在上方用参与布局的 content width 实现。
+/// Paged mode keeps its existing TabView and bounded pan. Gestures live on a
+/// stationary viewport so both pinch and double tap use the same focal math.
 private struct ZoomableReaderSurface<Content: View>: View {
     @Binding var isZoomed: Bool
+    let onSingleTap: () -> Void
     private let content: Content
     @State private var scale: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var viewportSize: CGSize = .zero
-    @State private var magnificationIsActive = false
-    @State private var magnificationStartScale: CGFloat = 1
+    @State private var magnificationStartScale: CGFloat?
     @State private var magnificationStartOffset: CGSize = .zero
-    @State private var panIsActive = false
-    @State private var panStartOffset: CGSize = .zero
+    @State private var panStartOffset: CGSize?
+    @GestureState private var magnifying = false
+    @GestureState private var panning = false
 
-    init(isZoomed: Binding<Bool>, @ViewBuilder content: () -> Content) {
+    init(isZoomed: Binding<Bool>, onSingleTap: @escaping () -> Void, @ViewBuilder content: () -> Content) {
         _isZoomed = isZoomed
+        self.onSingleTap = onSingleTap
         self.content = content()
     }
 
     var body: some View {
-        content
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onGeometryChange(for: CGSize.self) { proxy in
-                proxy.size
-            } action: { newSize in
-                viewportSize = newSize
-                offset = clampedOffset(offset, scale: scale, viewport: newSize)
+        GeometryReader { geometry in
+            ZStack {
+                content
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .scaleEffect(scale)
+                    .offset(offset)
             }
-            .scaleEffect(scale)
-            .offset(offset)
-            // 这里不做固定 frame 或单页裁剪；最外层的全屏阅读器
-            // 自然形成屏幕边界，相邻漫画页仍作为同一整体变换。
+            .frame(width: geometry.size.width, height: geometry.size.height)
             .contentShape(Rectangle())
+            .clipped()
             .simultaneousGesture(magnifyGesture)
-            // 只在放大后抢占单指拖动；100% 时不挂载平移手势，不影响阅读滚动。
-            .highPriorityGesture(
-                panGesture,
-                including: scale > 1.001 && !magnificationIsActive ? .all : .none
+            .highPriorityGesture(panGesture, including: scale > 1.001 && !magnifying ? .all : .none)
+            .gesture(
+                SpatialTapGesture(count: 2).exclusively(before: SpatialTapGesture(count: 1))
+                    .onEnded { value in
+                        switch value {
+                        case .first(let tap):
+                            let next: CGFloat = scale > 1.01 ? 1 : 2
+                            withAnimation(.spring(response: 0.30, dampingFraction: 0.90)) {
+                                applyScale(next, from: scale, offset: offset, focus: tap.location)
+                            }
+                        case .second: onSingleTap()
+                        }
+                    }
             )
-            .onDisappear {
-                isZoomed = false
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                let old = viewportSize
+                viewportSize = size
+                magnificationStartScale = nil
+                panStartOffset = nil
+                if old.width > 0, old.height > 0 {
+                    offset = ReaderZoomGeometry.clampedOffset(
+                        CGSize(width: offset.width * size.width / old.width,
+                               height: offset.height * size.height / old.height),
+                        scale: scale, viewport: size
+                    )
+                }
             }
+            .onChange(of: magnifying) { _, value in
+                if !value { finishPinch() }
+            }
+            .onChange(of: panning) { _, value in
+                if !value { panStartOffset = nil }
+            }
+            .onDisappear { isZoomed = false }
             .accessibilityLabel("漫画阅读区")
             .accessibilityValue("缩放 \(Int(scale * 100))%")
+        }
     }
 
     private var magnifyGesture: some Gesture {
         MagnifyGesture(minimumScaleDelta: 0.01)
+            .updating($magnifying) { _, state, _ in state = true }
             .onChanged { value in
-                if !magnificationIsActive {
-                    magnificationIsActive = true
+                if magnificationStartScale == nil {
                     magnificationStartScale = scale
                     magnificationStartOffset = offset
+                    panStartOffset = nil
                 }
+                let initial = magnificationStartScale ?? scale
+                applyScale(ReaderInteractionPolicy.clampedZoomScale(initial * value.magnification),
+                           from: initial, offset: magnificationStartOffset, focus: value.startLocation)
+            }
+            .onEnded { _ in finishPinch() }
+    }
 
-                let nextScale = ReaderInteractionPolicy.clampedZoomScale(
-                    magnificationStartScale * value.magnification
-                )
-                let focalPoint = CGSize(
-                    width: (value.startAnchor.x - 0.5) * viewportSize.width,
-                    height: (value.startAnchor.y - 0.5) * viewportSize.height
-                )
-                let ratio = nextScale / max(magnificationStartScale, 0.001)
-                let focalOffset = CGSize(
-                    width: focalPoint.width - (focalPoint.width - magnificationStartOffset.width) * ratio,
-                    height: focalPoint.height - (focalPoint.height - magnificationStartOffset.height) * ratio
-                )
-                scale = nextScale
-                offset = clampedOffset(focalOffset, scale: nextScale, viewport: viewportSize)
-                if nextScale > 1.01 { setZoomed(true) }
-            }
-            .onEnded { value in
-                magnificationIsActive = false
-                if scale <= 1.01 {
-                    scale = 1
-                    offset = .zero
-                    setZoomed(false)
-                } else {
-                    offset = clampedOffset(offset, scale: scale, viewport: viewportSize)
-                }
-            }
+    private func applyScale(_ next: CGFloat, from initial: CGFloat, offset initialOffset: CGSize, focus: CGPoint) {
+        let centeredFocus = CGPoint(x: focus.x - viewportSize.width / 2,
+                                    y: focus.y - viewportSize.height / 2)
+        let proposed = ReaderZoomGeometry.focalOffset(
+            focus: centeredFocus, initialOffset: initialOffset, ratio: next / max(1, initial)
+        )
+        scale = next
+        offset = ReaderZoomGeometry.clampedOffset(proposed, scale: next, viewport: viewportSize)
+        let zoomed = next > ReaderInteractionPolicy.continuousHorizontalActivationScale
+        if isZoomed != zoomed { isZoomed = zoomed }
+    }
+
+    private func finishPinch() {
+        magnificationStartScale = nil
+        if scale <= ReaderInteractionPolicy.continuousHorizontalActivationScale {
+            scale = 1
+            offset = .zero
+            isZoomed = false
+        }
     }
 
     private var panGesture: some Gesture {
         DragGesture(minimumDistance: 4, coordinateSpace: .local)
+            .updating($panning) { _, state, _ in state = true }
             .onChanged { value in
-                guard scale > 1.001, !magnificationIsActive else { return }
-                if !panIsActive {
-                    panIsActive = true
-                    panStartOffset = offset
-                }
-                let proposed = CGSize(
-                    width: panStartOffset.width + value.translation.width,
-                    height: panStartOffset.height + value.translation.height
+                guard scale > 1.001, !magnifying else { return }
+                if panStartOffset == nil { panStartOffset = offset }
+                let start = panStartOffset ?? offset
+                offset = ReaderZoomGeometry.clampedOffset(
+                    CGSize(width: start.width + value.translation.width, height: start.height + value.translation.height),
+                    scale: scale, viewport: viewportSize
                 )
-                offset = clampedOffset(proposed, scale: scale, viewport: viewportSize)
             }
-            .onEnded { _ in
-                panIsActive = false
-                offset = clampedOffset(offset, scale: scale, viewport: viewportSize)
-            }
-    }
-
-    private func clampedOffset(_ proposed: CGSize, scale: CGFloat, viewport: CGSize) -> CGSize {
-        let maximumX = max(0, viewport.width * (scale - 1) / 2)
-        let maximumY = max(0, viewport.height * (scale - 1) / 2)
-        return CGSize(
-            width: min(max(proposed.width, -maximumX), maximumX),
-            height: min(max(proposed.height, -maximumY), maximumY)
-        )
-    }
-
-    private func setZoomed(_ newValue: Bool) {
-        guard isZoomed != newValue else { return }
-        isZoomed = newValue
+            .onEnded { _ in panStartOffset = nil }
     }
 }

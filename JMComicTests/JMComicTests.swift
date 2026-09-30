@@ -446,6 +446,59 @@ final class JMComicTests: XCTestCase {
         XCTAssertNil(RootTabSwipePolicy.adjacentTab(from: .account, horizontalTranslation: -1))
     }
 
+    func testRootHorizontalAxisStaysLockedThroughVerticalDriftAndRelease() {
+        var axis = RootTabSwipeAxisLock()
+        XCTAssertTrue(axis.begin(translation: CGSize(width: -24, height: 3), isAllowed: true))
+        let drift = CGSize(width: -130, height: 240)
+        XCTAssertEqual(axis.phase, .horizontal)
+        XCTAssertEqual(RootTabSwipePolicy.interactiveOffset(
+            from: .search, translation: drift, viewportWidth: 400,
+            horizontalAxisLocked: axis.phase == .horizontal
+        ), -130)
+        XCTAssertEqual(RootTabSwipePolicy.destination(
+            from: .search, translation: drift, predictedEndTranslation: drift,
+            horizontalAxisLocked: axis.phase == .horizontal
+        ), .favorites)
+    }
+
+    func testRootAxisRejectsVerticalStartUntilNextGestureAndCancellationResets() {
+        var axis = RootTabSwipeAxisLock()
+        XCTAssertFalse(axis.begin(translation: CGSize(width: 3, height: 24), isAllowed: true))
+        XCTAssertFalse(axis.begin(translation: CGSize(width: 180, height: 28), isAllowed: true))
+        axis.reset()
+        XCTAssertEqual(axis.phase, .undecided)
+        XCTAssertFalse(axis.begin(translation: CGSize(width: 24, height: 3), isAllowed: false))
+        axis.reset()
+        XCTAssertTrue(axis.begin(translation: CGSize(width: 24, height: 3), isAllowed: true))
+        XCTAssertNil(RootTabSwipePolicy.destination(
+            from: .search, translation: .zero,
+            predictedEndTranslation: CGSize(width: 400, height: 0), horizontalAxisLocked: true
+        ))
+        axis.reset()
+        XCTAssertEqual(axis.phase, .undecided)
+    }
+
+    func testRootLockedSwipeNaturallyReversesAcrossZeroAndHonorsEdges() {
+        for x: CGFloat in [-100, -10, 0, 10, 100] {
+            XCTAssertEqual(RootTabSwipePolicy.interactiveOffset(
+                from: .favorites, translation: CGSize(width: x, height: 200),
+                viewportWidth: 400, horizontalAxisLocked: true
+            ), x)
+        }
+        XCTAssertEqual(RootTabSwipePolicy.destination(
+            from: .favorites, translation: CGSize(width: 100, height: 200),
+            predictedEndTranslation: CGSize(width: -180, height: 210), horizontalAxisLocked: true
+        ), .search)
+        XCTAssertEqual(RootTabSwipePolicy.interactiveOffset(
+            from: .explore, translation: CGSize(width: 100, height: 200),
+            viewportWidth: 400, horizontalAxisLocked: true
+        ), 16)
+        XCTAssertNil(RootTabSwipePolicy.destination(
+            from: .account, translation: CGSize(width: -100, height: 200),
+            predictedEndTranslation: CGSize(width: -180, height: 210), horizontalAxisLocked: true
+        ))
+    }
+
     func testRootTabTrackpadProjectsContinuousHorizontalScrollIntoExistingSwipePolicy() {
         XCTAssertTrue(RootTabTrackpadPolicy.isHorizontal(
             velocity: CGPoint(x: -400, y: 40)
@@ -4140,6 +4193,145 @@ final class JMComicTests: XCTestCase {
         ))
     }
 
+    func testReaderFocalCoordinateSurvivesZoomAndChangedPageOrigins() {
+        let original = CGRect(x: 0, y: 2_100, width: 400, height: 800)
+        let normalized = CGPoint(x: 0.23, y: 0.67)
+        let originalPoint = ReaderZoomGeometry.point(normalized, in: original)
+        XCTAssertEqual(ReaderZoomGeometry.normalizedPoint(originalPoint, in: original), normalized)
+        // A changed lazy estimate above this row needn't be exactly 2x.
+        let enlarged = CGRect(x: 0, y: 4_300, width: 800, height: 1_600)
+        let focus = CGPoint(x: 90, y: 237)
+        let offset = ReaderZoomGeometry.scrollOffset(
+            pageFrame: enlarged, point: normalized, focus: focus,
+            contentSize: CGSize(width: 800, height: 20_000),
+            viewport: CGSize(width: 400, height: 800), insets: .zero
+        )
+        let restored = ReaderZoomGeometry.normalizedPoint(
+            CGPoint(x: offset.x + focus.x, y: offset.y + focus.y), in: enlarged
+        )
+        XCTAssertEqual(restored.x, normalized.x, accuracy: 0.000001)
+        XCTAssertEqual(restored.y, normalized.y, accuracy: 0.000001)
+        let reset = ReaderZoomGeometry.scrollOffset(
+            pageFrame: original, point: normalized, focus: focus,
+            contentSize: CGSize(width: 400, height: 10_000),
+            viewport: CGSize(width: 400, height: 800), insets: .zero
+        )
+        XCTAssertEqual(reset.x, 0)
+        XCTAssertEqual(reset.y + focus.y, originalPoint.y, accuracy: 0.000001)
+    }
+
+    func testReaderZoomBoundsAndPagedDoubleTapUseSameFocalMath() {
+        let focus = CGPoint(x: -110, y: 160)
+        let enlarged = ReaderZoomGeometry.focalOffset(focus: focus, initialOffset: .zero, ratio: 2)
+        XCTAssertEqual(enlarged, CGSize(width: 110, height: -160))
+        XCTAssertEqual(ReaderZoomGeometry.focalOffset(focus: focus, initialOffset: enlarged, ratio: 0.5), .zero)
+        XCTAssertEqual(ReaderZoomGeometry.clampedOffset(
+            CGSize(width: 999, height: -999), scale: 2, viewport: CGSize(width: 400, height: 800)
+        ), CGSize(width: 200, height: -400))
+        XCTAssertEqual(ReaderZoomGeometry.scrollOffset(
+            pageFrame: CGRect(x: 0, y: 0, width: 800, height: 1_600),
+            point: CGPoint(x: 1, y: 1), focus: .zero,
+            contentSize: CGSize(width: 800, height: 1_600),
+            viewport: CGSize(width: 600, height: 1_000),
+            insets: UIEdgeInsets(top: 20, left: 0, bottom: 30, right: 0)
+        ), CGPoint(x: 200, y: 630))
+    }
+
+    @MainActor
+    func testContinuousZoomBridgeRetainsOffCenterPagePointAndAllowsPanAfterCancel() async {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        let host = UIViewController()
+        window.rootViewController = host
+        window.isHidden = false
+        let scroll = UIScrollView(frame: window.bounds)
+        host.view.addSubview(scroll)
+        scroll.contentSize = CGSize(width: 400, height: 10_000)
+        scroll.contentOffset = CGPoint(x: 0, y: 2_300)
+        let zoom = ReaderContinuousZoomController()
+        let marker = ReaderPageGeometryMarker.Marker(frame: CGRect(x: 0, y: 2_100, width: 400, height: 800))
+        marker.index = 3
+        marker.zoom = zoom
+        scroll.addSubview(marker)
+        zoom.register(marker)
+        zoom.viewportChanged(to: scroll.bounds.size)
+        zoom.didScroll()
+        let focus = CGPoint(x: 90, y: 237)
+        zoom.pinch(magnification: 2, focus: focus)
+        zoom.endPinch() // Same completion used when GestureState cancels.
+        marker.frame = CGRect(x: 0, y: 4_300, width: 800, height: 1_600)
+        scroll.contentSize = CGSize(width: 800, height: 20_000)
+        zoom.geometryChanged()
+        try? await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(zoom.scale, 2)
+        XCTAssertEqual(scroll.contentOffset.x, 90, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentOffset.y, 4_937, accuracy: 0.5)
+        zoom.beginPan()
+        scroll.contentOffset = CGPoint(x: 160, y: 5_000)
+        zoom.geometryChanged()
+        try? await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset, CGPoint(x: 160, y: 5_000))
+        zoom.didScroll()
+        scroll.bounds.size = CGSize(width: 600, height: 1_000)
+        zoom.viewportChanged(to: scroll.bounds.size)
+        marker.frame = CGRect(x: 0, y: 6_450, width: 1_200, height: 2_400)
+        scroll.contentSize = CGSize(width: 1_200, height: 30_000)
+        zoom.geometryChanged()
+        try? await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.x, 240, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentOffset.y, 7_600, accuracy: 0.5)
+        zoom.detach()
+        window.isHidden = true
+    }
+
+    @MainActor
+    func testLazyContinuousRowsKeepFocalPointAndBaseMeasurementsAcrossZoom() async throws {
+        let zoom = ReaderContinuousZoomController()
+        let host = UIHostingController(rootView: SyntheticContinuousRows(zoom: zoom))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 400, height: 800)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        defer { zoom.detach(); window.isHidden = true; previousKeyWindow?.makeKey() }
+        try await Task.sleep(for: .milliseconds(200))
+        func descendants(_ view: UIView) -> [UIView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let scroll = try XCTUnwrap(descendants(host.view).compactMap { $0 as? UIScrollView }.first)
+        zoom.viewportChanged(to: scroll.bounds.size)
+        scroll.contentOffset = CGPoint(x: 0, y: 300)
+        try await Task.sleep(for: .milliseconds(120))
+        let focus = CGPoint(x: 110, y: 230)
+        let originalPoint = CGPoint(x: scroll.contentOffset.x + focus.x, y: scroll.contentOffset.y + focus.y)
+        let originalRow = try XCTUnwrap(descendants(host.view).compactMap { $0 as? ReaderPageGeometryMarker.Marker }
+            .first { $0.convert($0.bounds, to: scroll).contains(originalPoint) })
+        let index = originalRow.index
+        let normalized = ReaderZoomGeometry.normalizedPoint(originalPoint, in: originalRow.convert(originalRow.bounds, to: scroll))
+        zoom.pinch(magnification: 2, focus: focus)
+        try await Task.sleep(for: .milliseconds(250))
+        zoom.endPinch()
+        try await Task.sleep(for: .milliseconds(150))
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(zoom.scale, 2)
+        let enlargedRow = try XCTUnwrap(descendants(host.view).compactMap { $0 as? ReaderPageGeometryMarker.Marker }
+            .first { $0.index == index })
+        let result = ReaderZoomGeometry.normalizedPoint(
+            CGPoint(x: scroll.contentOffset.x + focus.x, y: scroll.contentOffset.y + focus.y),
+            in: enlargedRow.convert(enlargedRow.bounds, to: scroll)
+        )
+        XCTAssertEqual(result.x, normalized.x, accuracy: 0.003)
+        XCTAssertEqual(result.y, normalized.y, accuracy: 0.003)
+        XCTAssertEqual(enlargedRow.bounds.width, 800, accuracy: 1)
+        XCTAssertEqual(enlargedRow.bounds.height, 1_200, accuracy: 1)
+        XCTAssertGreaterThan(scroll.contentSize.height, 12_000)
+        XCTAssertLessThan(descendants(host.view).compactMap { $0 as? ReaderPageGeometryMarker.Marker }.count, 20)
+    }
+
     func testReaderZoomScaleIsBounded() {
         XCTAssertEqual(ReaderInteractionPolicy.clampedZoomScale(0.2), 1)
         XCTAssertEqual(ReaderInteractionPolicy.clampedZoomScale(2.5), 2.5)
@@ -4172,6 +4364,23 @@ final class JMComicTests: XCTestCase {
         XCTAssertTrue(
             ReaderInteractionPolicy.continuousHorizontalScrollingEnabled(scale: 3)
         )
+    }
+}
+
+private struct SyntheticContinuousRows: View {
+    @ObservedObject var zoom: ReaderContinuousZoomController
+    var body: some View {
+        ScrollView([.vertical, .horizontal]) {
+            LazyVStack(spacing: 0) {
+                ForEach(0..<20, id: \.self) { index in
+                    ReaderContinuousRow(baseWidth: 400, scale: zoom.scale, index: index, zoom: zoom,
+                                        content: Color.gray.frame(height: 600).overlay {
+                        Rectangle().fill(.cyan).frame(width: 2)
+                    })
+                }
+            }
+            .frame(width: 400 * zoom.scale)
+        }
     }
 }
 

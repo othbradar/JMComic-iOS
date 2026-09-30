@@ -98,11 +98,13 @@ enum RootTabSwipePolicy {
     static func destination(
         from source: RootTab,
         translation: CGSize,
-        predictedEndTranslation: CGSize
+        predictedEndTranslation: CGSize,
+        horizontalAxisLocked: Bool = false
     ) -> RootTab? {
         let horizontal = translation.width
         let vertical = translation.height
-        guard abs(horizontal) > abs(vertical) * horizontalDominance else { return nil }
+        guard horizontal != 0,
+              horizontalAxisLocked || abs(horizontal) > abs(vertical) * horizontalDominance else { return nil }
 
         let projectedHorizontal = predictedEndTranslation.width
         guard abs(horizontal) >= minimumTranslation
@@ -125,9 +127,10 @@ enum RootTabSwipePolicy {
     static func interactiveOffset(
         from source: RootTab,
         translation: CGSize,
-        viewportWidth: CGFloat
+        viewportWidth: CGFloat,
+        horizontalAxisLocked: Bool = false
     ) -> CGFloat {
-        guard abs(translation.width) > abs(translation.height) * horizontalDominance else {
+        guard horizontalAxisLocked || abs(translation.width) > abs(translation.height) * horizontalDominance else {
             return 0
         }
 
@@ -137,6 +140,23 @@ enum RootTabSwipePolicy {
         // 跟手，否则两页之间会露出背景缝隙。
         return raw * (hasDestination ? 1 : 0.16)
     }
+}
+
+/// UIKit asks once when a pan leaves its possible state. An ambiguous or
+/// vertical start fails for this entire touch sequence; a horizontal start
+/// keeps its axis even when the finger drifts vertically or crosses zero.
+struct RootTabSwipeAxisLock {
+    enum Phase { case undecided, horizontal, rejected }
+    private(set) var phase: Phase = .undecided
+
+    mutating func begin(translation: CGSize, isAllowed: Bool) -> Bool {
+        guard phase == .undecided else { return phase == .horizontal }
+        phase = isAllowed && abs(translation.width) > abs(translation.height)
+            * RootTabSwipePolicy.horizontalDominance ? .horizontal : .rejected
+        return phase == .horizontal
+    }
+
+    mutating func reset() { phase = .undecided }
 }
 
 /// Magic Keyboard and external trackpads deliver two-finger movement as
@@ -1147,6 +1167,9 @@ private struct RootTabSwipeModifier: ViewModifier {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
+                    RootNavigationBarMarginsBridge()
+                        .frame(width: 0, height: 0)
+                        .allowsHitTesting(false)
                 }
             }
     }
@@ -2907,7 +2930,7 @@ private final class RootResidentState: ObservableObject {
 private struct RootResidentTransition: Equatable {
     let token: UUID
     let source: RootTab
-    let destination: RootTab
+    var destination: RootTab
     let viewportWidth: CGFloat
     var offset: CGFloat
     var isSettling = false
@@ -3075,9 +3098,19 @@ private struct RootNavigationBarMarginsBridge: UIViewRepresentable {
     }
 
     final class MarginView: UIView {
+        private weak var cachedWindow: UIWindow?
+        private weak var cachedController: UINavigationController?
+        private weak var cachedBar: UINavigationBar?
+        private var updateScheduled = false
+
+        override func didMoveToSuperview() {
+            super.didMoveToSuperview()
+            invalidateHierarchy()
+        }
+
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            scheduleUpdate()
+            invalidateHierarchy()
         }
 
         override func layoutSubviews() {
@@ -3085,30 +3118,61 @@ private struct RootNavigationBarMarginsBridge: UIViewRepresentable {
             scheduleUpdate()
         }
 
+        private func invalidateHierarchy() {
+            cachedWindow = nil
+            cachedController = nil
+            cachedBar = nil
+            scheduleUpdate()
+        }
+
         func scheduleUpdate() {
-            guard window != nil else { return }
+            guard window != nil, !updateScheduled else { return }
+            updateScheduled = true
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                var root: UIView = self
-                while let superview = root.superview { root = superview }
-                Self.updateNavigationBars(in: root)
+                self.updateScheduled = false
+                self.updateMargins()
             }
         }
 
-        private static func updateNavigationBars(in view: UIView) {
-            if let navigationBar = view as? UINavigationBar {
-                var margins = navigationBar.directionalLayoutMargins
-                let updatedLeading = max(16, margins.leading)
-                let updatedTrailing = max(16, margins.trailing)
-                if margins.leading != updatedLeading || margins.trailing != updatedTrailing {
-                    margins.leading = updatedLeading
-                    margins.trailing = updatedTrailing
-                    navigationBar.directionalLayoutMargins = margins
+        private func updateMargins() {
+            guard let window else { return }
+            let navigationBar: UINavigationBar
+            if cachedWindow === window,
+               let controller = cachedController,
+               let bar = cachedBar,
+               controller.navigationBar === bar,
+               bar.window === window,
+               isDescendant(of: controller.view) {
+                navigationBar = bar
+            } else {
+                // Walk only this surface's responder ancestry. Never search
+                // another resident stack, a sheet, or the complete window.
+                var responder: UIResponder? = self
+                var owner: UINavigationController?
+                while let current = responder {
+                    if let controller = current as? UIViewController,
+                       let navigation = (controller as? UINavigationController)
+                        ?? controller.navigationController {
+                        owner = navigation
+                        break
+                    }
+                    responder = current.next
                 }
+                guard let owner, owner.navigationBar.window === window else { return }
+                cachedWindow = window
+                cachedController = owner
+                cachedBar = owner.navigationBar
+                navigationBar = owner.navigationBar
             }
-            for child in view.subviews {
-                updateNavigationBars(in: child)
-            }
+
+            var margins = navigationBar.directionalLayoutMargins
+            let leading = max(16, margins.leading)
+            let trailing = max(16, margins.trailing)
+            guard margins.leading != leading || margins.trailing != trailing else { return }
+            margins.leading = leading
+            margins.trailing = trailing
+            navigationBar.directionalLayoutMargins = margins
         }
     }
 }
@@ -3151,6 +3215,7 @@ private struct RootTabTouchPanGesture: UIGestureRecognizerRepresentable {
         var gesture: RootTabTouchPanGesture
         private var startLocation: CGPoint?
         private var isTracking = false
+        private var axisLock = RootTabSwipeAxisLock()
 
         init(gesture: RootTabTouchPanGesture) {
             self.gesture = gesture
@@ -3164,8 +3229,11 @@ private struct RootTabTouchPanGesture: UIGestureRecognizerRepresentable {
             let translation = pan.translation(in: window)
             let location = pan.location(in: window)
             let start = CGPoint(x: location.x - translation.x, y: location.y - translation.y)
-            let allowed = gesture.shouldBegin(
-                start, CGSize(width: translation.x, height: translation.y)
+            axisLock.reset()
+            let sample = CGSize(width: translation.x, height: translation.y)
+            let allowed = axisLock.begin(
+                translation: sample,
+                isAllowed: gesture.shouldBegin(start, sample)
             )
             startLocation = allowed ? start : nil
             return allowed
@@ -3220,6 +3288,7 @@ private struct RootTabTouchPanGesture: UIGestureRecognizerRepresentable {
         private func reset() {
             startLocation = nil
             isTracking = false
+            axisLock.reset()
         }
     }
 }
@@ -3232,6 +3301,7 @@ private struct RootResidentPages: View {
     @EnvironmentObject private var appearance: AppAppearanceStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var transition: RootResidentTransition?
+    @State private var sequenceInvalidated = false
     @State private var swipeRegistry = RootTabSwipeRegistry()
     @State private var gestureLifecycle = RootTabGestureLifecycle()
 
@@ -3267,13 +3337,9 @@ private struct RootResidentPages: View {
             .background {
                 rootTrackpadBridge(pageWidth: pageWidth)
             }
+            .onChange(of: proxy.size) { _, _ in resetTransition() }
         }
         .padding(.top, pageHost.contentTopInset)
-        .overlay {
-            RootNavigationBarMarginsBridge()
-                .frame(width: 0, height: 0)
-                .allowsHitTesting(false)
-        }
         .background(appearance.background(for: colorScheme).ignoresSafeArea())
         .environment(\.readerIsPresented, state.readerPresentationBinding)
         .environment(\.rootTabSelection, state.selectedTabBinding)
@@ -3283,13 +3349,20 @@ private struct RootResidentPages: View {
                   let transition,
                   transition.source != newValue else { return }
             // A native tab/sidebar tap wins over an unfinished physical drag.
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                self.transition = nil
-            }
-            gestureLifecycle.end()
+            resetTransition()
         }
+        .onChange(of: state.readerIsPresented) { _, presented in
+            if presented { resetTransition() }
+        }
+        .onDisappear { resetTransition() }
+    }
+
+    private func resetTransition() {
+        if transition != nil { sequenceInvalidated = true }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { transition = nil }
+        gestureLifecycle.end()
     }
 
     private var explorePage: some View {
@@ -3362,18 +3435,19 @@ private struct RootResidentPages: View {
     private func rootDragGesture(pageWidth: CGFloat) -> RootTabTouchPanGesture {
         RootTabTouchPanGesture(
             shouldBegin: { startLocation, translation in
-                !state.readerIsPresented
+                let allowed = !state.readerIsPresented
                     && transition == nil
                     && !gestureLifecycle.isActive
-                    && abs(translation.width) > abs(translation.height)
-                        * RootTabSwipePolicy.horizontalDominance
                     && RootTabSwipePolicy.adjacentTab(
                         from: state.selectedTab,
                         horizontalTranslation: translation.width
                     ) != nil
                     && activeSwipeSurface(at: startLocation) != nil
+                if allowed { sequenceInvalidated = false }
+                return allowed
             },
             onChanged: { startLocation, translation in
+                guard !sequenceInvalidated else { return }
                 if transition == nil {
                     beginTransition(
                         startLocation: startLocation,
@@ -3410,9 +3484,11 @@ private struct RootResidentPages: View {
                             horizontalTranslation: velocity.x
                           ) != nil,
                           activeSwipeSurface(at: startLocation) != nil else { return false }
+                    sequenceInvalidated = false
                     return true
                 },
                 onChanged: { startLocation, translation in
+                    guard !sequenceInvalidated else { return }
                     if transition == nil {
                         beginTransition(
                             startLocation: startLocation,
@@ -3453,8 +3529,6 @@ private struct RootResidentPages: View {
         guard !state.readerIsPresented,
               transition == nil,
               abs(translation.width) >= RootTabSwipePolicy.activationTranslation,
-              abs(translation.width) > abs(translation.height)
-                * RootTabSwipePolicy.horizontalDominance,
               activeSwipeSurface(at: startLocation) != nil,
               let destination = RootTabSwipePolicy.adjacentTab(
                 from: state.selectedTab,
@@ -3466,16 +3540,15 @@ private struct RootResidentPages: View {
         let proposed = RootTabSwipePolicy.interactiveOffset(
             from: source,
             translation: translation,
-            viewportWidth: pageWidth
+            viewportWidth: pageWidth,
+            horizontalAxisLocked: true
         )
-        let directionalOffset = destination.rawValue > source.rawValue
-            ? min(0, proposed) : max(0, proposed)
         transition = RootResidentTransition(
             token: UUID(),
             source: source,
             destination: destination,
             viewportWidth: pageWidth,
-            offset: directionalOffset
+            offset: proposed
         )
     }
 
@@ -3484,10 +3557,15 @@ private struct RootResidentPages: View {
         let proposed = RootTabSwipePolicy.interactiveOffset(
             from: current.source,
             translation: translation,
-            viewportWidth: current.viewportWidth
+            viewportWidth: current.viewportWidth,
+            horizontalAxisLocked: true
         )
-        current.offset = current.destination.rawValue > current.source.rawValue
-            ? min(0, proposed) : max(0, proposed)
+        current.offset = proposed
+        if let destination = RootTabSwipePolicy.adjacentTab(
+            from: current.source, horizontalTranslation: translation.width
+        ) {
+            current.destination = destination
+        }
         transition = current
     }
 
@@ -3503,9 +3581,11 @@ private struct RootResidentPages: View {
         let destination = RootTabSwipePolicy.destination(
             from: current.source,
             translation: translation,
-            predictedEndTranslation: predictedEndTranslation
+            predictedEndTranslation: predictedEndTranslation,
+            horizontalAxisLocked: true
         )
-        let shouldCommit = destination == current.destination
+        if let destination { current.destination = destination }
+        let shouldCommit = destination != nil
         current.isSettling = true
         transition = current
 
