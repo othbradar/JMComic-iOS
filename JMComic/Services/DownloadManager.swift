@@ -67,9 +67,25 @@ struct PageDownloadDescriptor: Codable {
     var referer: String
     // nil 用于兼容旧版任务描述。新版不恢复系统后台任务。
     var attemptID: String?
+    // Captured at enqueue, then copied unchanged by retry/pause/resume.
+    // Optional only for decoding legacy descriptors; no background restore.
+    var imageProcessing: PageImageProcessing? = nil
+    var imageStorage: PageImageStorage? = nil
 
     var progressID: String { "\(comic.id):\(chapterID)" }
     var attemptToken: String { attemptID ?? "legacy:\(progressID)" }
+
+    func storing(_ image: ImageScrambler.EncodedPage) -> Self {
+        var result = self
+        let path = relativePath as NSString
+        let suffix = "." + image.fileExtension
+        let stem = (path.lastPathComponent as NSString).deletingPathExtension
+        let name = DownloadStorageNaming.safeComponent(
+            stem, maxUTF8Bytes: DownloadStorageNaming.filesystemComponentByteLimit - suffix.utf8.count
+        ) + suffix
+        result.relativePath = (path.deletingLastPathComponent as NSString).appendingPathComponent(name)
+        return result
+    }
 }
 
 enum DownloadConcurrencyPreferences {
@@ -324,7 +340,8 @@ enum DownloadStorageMigration {
                         ? existingFileName
                         : DownloadStorageNaming.pageFileName(
                             comicName: comic.comic.name,
-                            imageNumber: record.globalOrdinal
+                            imageNumber: record.globalOrdinal,
+                            fileExtension: (record.relativePath as NSString).pathExtension
                         )
                     let newRelativePath = "\(comic.storageDirectoryName)/\(chapterDirectory)/\(fileName)"
                     let destination = downloadRoot.appendingPathComponent(newRelativePath)
@@ -438,8 +455,10 @@ enum DownloadStorageNaming {
         return safeComponent(preferred, maxUTF8Bytes: baseBudget) + suffix
     }
 
-    static func pageFileName(comicName: String, imageNumber: Int) -> String {
-        let suffix = "-\(max(1, imageNumber)).jpg"
+    static func pageFileName(comicName: String, imageNumber: Int, fileExtension: String = "jpg") -> String {
+        let supported = ["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "heic", "heif"]
+        let ext = supported.contains(fileExtension.lowercased()) ? fileExtension.lowercased() : "jpg"
+        let suffix = "-\(max(1, imageNumber)).\(ext)"
         let titleBudget = max(1, generatedComponentByteLimit - suffix.utf8.count)
         return safeComponent(comicName, maxUTF8Bytes: titleBudget) + suffix
     }
@@ -458,9 +477,10 @@ enum DownloadStorageNaming {
         comicName: String,
         storageDirectoryName: String,
         chapterDirectoryName: String,
-        imageNumber: Int
+        imageNumber: Int,
+        fileExtension: String = "jpg"
     ) -> String {
-        "\(storageDirectoryName)/\(chapterDirectoryName)/\(pageFileName(comicName: comicName, imageNumber: imageNumber))"
+        "\(storageDirectoryName)/\(chapterDirectoryName)/\(pageFileName(comicName: comicName, imageNumber: imageNumber, fileExtension: fileExtension))"
     }
 
     static func safeComponent(_ value: String, maxUTF8Bytes: Int) -> String {
@@ -692,6 +712,8 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     @MainActor
     func enqueue(comic: ComicSummary, chapters: [Chapter], api: APIClient) async throws {
         guard let database else { throw OfflineLibraryDatabaseError.invalidData("数据库未初始化") }
+        let imageProcessing = PageImagePreferences.processing()
+        let imageStorage = PageImagePreferences.storage()
         setTombstoned(false, comicID: comic.id)
         let storageDirectoryName = try resolvedStorageDirectoryName(for: comic)
         try database.upsertComic(comic, storageDirectoryName: storageDirectoryName)
@@ -843,7 +865,9 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
                         imageDomains: imageDomains,
                         domainIndex: 0,
                         referer: api.configuration.apiDomains.first ?? "",
-                        attemptID: attemptID
+                        attemptID: attemptID,
+                        imageProcessing: imageProcessing,
+                        imageStorage: imageStorage
                     )
                     if schedule(descriptor) { scheduledPageCount += 1 }
                 }
@@ -1428,20 +1452,23 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
             finishTransfer(descriptor)
             return
         }
-        let decoded: Data
+        let decoded: ImageScrambler.EncodedPage
         do {
             decoded = try ImageScrambler.decode(
                 encrypted,
                 scrambleID: descriptor.scrambleID,
                 photoID: descriptor.chapterID,
-                filename: descriptor.filename
+                filename: descriptor.filename,
+                processing: descriptor.imageProcessing ?? .faithful,
+                storage: descriptor.imageStorage ?? .lossless
             )
         } catch {
             retryOrFail(descriptor, error: error.localizedDescription)
             return
         }
 
-        let destination = offlineRoot.appendingPathComponent(descriptor.relativePath)
+        let storedDescriptor = descriptor.storing(decoded)
+        let destination = offlineRoot.appendingPathComponent(storedDescriptor.relativePath)
         guard !isTombstoned(comicID: descriptor.comic.id),
               !isTerminallyFailed(progressID: descriptor.progressID),
               isCurrentAttempt(descriptor) else {
@@ -1449,7 +1476,28 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
             return
         }
         do {
-            try writeVisibleImage(decoded, to: destination)
+            guard let database else { throw OfflineLibraryDatabaseError.invalidData("数据库未初始化") }
+            if storedDescriptor.relativePath != descriptor.relativePath {
+                // Never overwrite a different existing format at this name.
+                // Reserve the real extension before writing: an interrupted
+                // write stays pending and is recoverable through the index.
+                guard !FileManager.default.fileExists(atPath: destination.path) else {
+                    throw OfflineLibraryDatabaseError.invalidData("保存目标已存在：\(destination.lastPathComponent)")
+                }
+                try database.reservePage(
+                    chapterID: descriptor.chapterID,
+                    pageIndex: descriptor.pageIndex,
+                    globalOrdinal: descriptor.globalOrdinal,
+                    relativePath: storedDescriptor.relativePath
+                )
+            }
+            guard !isTombstoned(comicID: descriptor.comic.id),
+                  !isTerminallyFailed(progressID: descriptor.progressID),
+                  isCurrentAttempt(descriptor) else {
+                finishTransfer(descriptor)
+                return
+            }
+            try writeVisibleImage(decoded.data, to: destination)
             guard !isTombstoned(comicID: descriptor.comic.id),
                   !isTerminallyFailed(progressID: descriptor.progressID),
                   isCurrentAttempt(descriptor) else {
@@ -1457,7 +1505,7 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
                 finishTransfer(descriptor)
                 return
             }
-            recordCompleted(descriptor)
+            recordCompleted(storedDescriptor)
             finishTransfer(descriptor)
             // delete(comicID:) tombstones first and then removes all indexed
             // files. If it raced between the guard and recordCompleted, the DB
@@ -1650,7 +1698,8 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
                 for: comic,
                 storageDirectoryName: storageDirectoryName,
                 chapterDirectoryName: chapterDirectoryName,
-                imageNumber: record.globalOrdinal
+                imageNumber: record.globalOrdinal,
+                fileExtension: (record.relativePath as NSString).pathExtension
             )
             let source = offlineRoot.appendingPathComponent(record.relativePath)
             let destination = offlineRoot.appendingPathComponent(newRelativePath)
@@ -1798,13 +1847,15 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
         for comic: ComicSummary,
         storageDirectoryName: String,
         chapterDirectoryName: String,
-        imageNumber: Int
+        imageNumber: Int,
+        fileExtension: String = "jpg"
     ) -> String {
         DownloadStorageNaming.relativePath(
             comicName: comic.name,
             storageDirectoryName: storageDirectoryName,
             chapterDirectoryName: chapterDirectoryName,
-            imageNumber: imageNumber
+            imageNumber: imageNumber,
+            fileExtension: fileExtension
         )
     }
 

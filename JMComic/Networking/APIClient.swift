@@ -87,9 +87,14 @@ final class APIClient: ObservableObject {
     var isLoggedIn: Bool { profile != nil }
     var needsCredentialLogin: Bool { isLoggedIn && !hasSavedCredentials }
 
-    init(secureStore: any SecureDataStoring = KeychainStore.shared) {
+    init(
+        secureStore: any SecureDataStoring = KeychainStore.shared,
+        configuration: AppConfiguration = .load(),
+        session: URLSession? = nil,
+        requiresBootstrap: Bool = true
+    ) {
         self.secureStore = secureStore
-        configuration = .load()
+        self.configuration = configuration
         let sessionConfiguration = URLSessionConfiguration.default
         sessionConfiguration.timeoutIntervalForRequest = 20
         sessionConfiguration.timeoutIntervalForResource = 60
@@ -97,7 +102,8 @@ final class APIClient: ObservableObject {
         sessionConfiguration.httpCookieStorage = .shared
         sessionConfiguration.requestCachePolicy = .reloadRevalidatingCacheData
         sessionConfiguration.httpMaximumConnectionsPerHost = DownloadConcurrencyPreferences.allowedRange.upperBound
-        session = URLSession(configuration: sessionConfiguration)
+        self.session = session ?? URLSession(configuration: sessionConfiguration)
+        hasCompletedBootstrap = !requiresBootstrap
         remoteImageCache.countLimit = 180
         remoteImageCache.totalCostLimit = 96 * 1_024 * 1_024
         decodedPageCache.countLimit = 28
@@ -1060,11 +1066,15 @@ final class APIClient: ObservableObject {
     }
 
     /// 阅读页加载：解扰与像素解码在后台执行，并跨 SwiftUI 页面生命周期合并请求。
-    func decodedPageImage(chapter: ChapterDetail, index: Int) async throws -> UIImage {
+    func decodedPageImage(
+        chapter: ChapterDetail,
+        index: Int,
+        processing: PageImageProcessing = PageImagePreferences.processing()
+    ) async throws -> UIImage {
         guard chapter.images.indices.contains(index) else { throw APIError.invalidResponse }
         try Task.checkCancellation()
         let filename = chapter.images[index]
-        let cacheKey = "\(chapter.id)|\(chapter.scrambleID)|\(filename)"
+        let cacheKey = Self.decodedPageCacheKey(chapter: chapter, filename: filename, processing: processing)
         if let cached = decodedPageCache.object(forKey: cacheKey as NSString) { return cached }
         if let load = decodedPageLoads[cacheKey] {
             return try await load.task.value
@@ -1077,6 +1087,7 @@ final class APIClient: ObservableObject {
                 chapter: chapter,
                 index: index,
                 cacheKey: cacheKey,
+                processing: processing,
                 loadID: loadID
             )
         }
@@ -1084,17 +1095,30 @@ final class APIClient: ObservableObject {
         return try await task.value
     }
 
-    func prefetchDecodedPages(chapter: ChapterDetail, after index: Int, count: Int = 2) {
+    nonisolated static func decodedPageCacheKey(
+        chapter: ChapterDetail,
+        filename: String,
+        processing: PageImageProcessing
+    ) -> String {
+        "\(processing.cacheIdentifier)|\(chapter.id)|\(chapter.scrambleID)|\(filename)"
+    }
+
+    func prefetchDecodedPages(
+        chapter: ChapterDetail,
+        after index: Int,
+        count: Int = 2,
+        processing: PageImageProcessing = PageImagePreferences.processing()
+    ) {
         guard count > 0 else { return }
         let upperBound = min(chapter.images.count, index + count + 1)
         guard index + 1 < upperBound else { return }
         for candidate in (index + 1)..<upperBound {
             let filename = chapter.images[candidate]
-            let cacheKey = "\(chapter.id)|\(chapter.scrambleID)|\(filename)"
+            let cacheKey = Self.decodedPageCacheKey(chapter: chapter, filename: filename, processing: processing)
             guard decodedPageCache.object(forKey: cacheKey as NSString) == nil,
                   decodedPageLoads[cacheKey] == nil else { continue }
             Task { @MainActor [weak self] in
-                _ = try? await self?.decodedPageImage(chapter: chapter, index: candidate)
+                _ = try? await self?.decodedPageImage(chapter: chapter, index: candidate, processing: processing)
             }
         }
     }
@@ -1115,6 +1139,7 @@ final class APIClient: ObservableObject {
         chapter: ChapterDetail,
         index: Int,
         cacheKey: String,
+        processing: PageImageProcessing,
         loadID: UUID
     ) async throws -> UIImage {
         defer {
@@ -1131,7 +1156,8 @@ final class APIClient: ObservableObject {
                 data,
                 scrambleID: chapter.scrambleID,
                 photoID: chapter.id,
-                filename: filename
+                filename: filename,
+                processing: processing
             )
         }.value
         decodedPageCache.setObject(image, forKey: cacheKey as NSString, cost: Self.memoryCost(of: image))
@@ -1139,10 +1165,15 @@ final class APIClient: ObservableObject {
     }
 
     func decodedPageData(chapter: ChapterDetail, index: Int) async throws -> Data {
+        guard chapter.images.indices.contains(index) else { throw APIError.invalidResponse }
+        let processing = PageImagePreferences.processing()
         let filename = chapter.images[index]
         let data = try await imageData(path: chapter.pagePath(at: index))
         return try await Task.detached(priority: .userInitiated) {
-            try ImageScrambler.decode(data, scrambleID: chapter.scrambleID, photoID: chapter.id, filename: filename)
+            try ImageScrambler.decode(
+                data, scrambleID: chapter.scrambleID, photoID: chapter.id,
+                filename: filename, processing: processing
+            ).data
         }.value
     }
 

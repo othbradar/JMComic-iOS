@@ -1,5 +1,39 @@
 import Foundation
 
+enum PageImageProcessing: String, Codable, Sendable {
+    case faithful
+    case repairChroma
+
+    // Only derived reading images use this namespace; CDN bytes, covers and
+    // completed offline files are not invalidated when processing changes.
+    var cacheIdentifier: String { "page-pixels-v2|\(rawValue)" }
+}
+
+enum PageImageStorage: String, Codable, CaseIterable, Sendable {
+    case lossless
+    case spaceSavingJPEG
+
+    var title: String {
+        switch self {
+        case .lossless: return "保真保存（原文件 / 无损 PNG）"
+        case .spaceSavingJPEG: return "省空间（有损 JPEG）"
+        }
+    }
+}
+
+enum PageImagePreferences {
+    static let repairChromaKey = "reader.repairChromaSeams"
+    static let storageKey = "downloads.pageImageStorage"
+
+    static func processing(defaults: UserDefaults = .standard) -> PageImageProcessing {
+        defaults.bool(forKey: repairChromaKey) ? .repairChroma : .faithful
+    }
+
+    static func storage(defaults: UserDefaults = .standard) -> PageImageStorage {
+        PageImageStorage(rawValue: defaults.string(forKey: storageKey) ?? "") ?? .lossless
+    }
+}
+
 struct AppConfiguration: Codable, Equatable {
     static let defaults = AppConfiguration(
         apiDomains: JMServiceAddresses.builtInAPIDomains,

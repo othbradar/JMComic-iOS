@@ -895,7 +895,7 @@ final class JMComicTests: XCTestCase {
         }
     }
 
-    func testLossyScrambleRepairsBoundaryChromaAndDownloadJPEGKeepsRepair() throws {
+    func testOptInChromaRepairAndLosslessDownloadKeepSamePixels() throws {
         let width = 96
         let height = 173
         let photoID = "1452616"
@@ -929,7 +929,8 @@ final class JMComicTests: XCTestCase {
             lossySource,
             scrambleID: 220_980,
             photoID: photoID,
-            filename: filename
+            filename: filename,
+            processing: .repairChroma
         )
         let repaired = try rgbxPixels(from: repairedImage)
         let joins = decodedStripJoins(height: height, segmentationCount: count)
@@ -955,22 +956,196 @@ final class JMComicTests: XCTestCase {
             0.75
         )
 
-        // DownloadManager writes decode(_:...) rather than the in-memory image.
-        // Decode that JPEG again and prove the second lossy pass does not revive
-        // the coloured joins seen by Files/Quick Look on the user's device.
-        let downloadData = try ImageScrambler.decode(
-            lossySource,
-            scrambleID: 220_980,
-            photoID: photoID,
-            filename: filename
+        // The optional transform is identical online and in lossless storage.
+        let download = try ImageScrambler.decode(
+            lossySource, scrambleID: 220_980, photoID: photoID,
+            filename: filename, processing: .repairChroma
         )
-        let downloadedPixels = try rgbxPixels(from: ImageScrambler.rasterImage(from: downloadData))
-        let downloadResidual = meanBoundaryChromaResidual(
-            downloadedPixels,
-            width: width,
-            joins: joins
+        XCTAssertEqual(download.fileExtension, "png")
+        assertSamePixels(
+            try normalizedPixels(repairedImage),
+            try normalizedPixels(ImageScrambler.rasterImage(from: download.data))
         )
-        XCTAssertLessThan(downloadResidual, naiveResidual * 0.45)
+    }
+
+    func testFaithfulPagesKeepColourDetailsAndAllStripRows() throws {
+        // Include divisible/non-divisible heights, single rows/columns and
+        // more strips than rows. Use both legacy ten strips and hashed strips.
+        for photoID in ["220980", "1452616"] {
+            let count = ImageScrambler.segmentationCount(scrambleID: 220_980, photoID: Int(photoID)!, filename: "00001")
+            for (width, height) in [(1, 1), (1, 7), (37, 80), (37, 173)] {
+                let pixels = colourDetailPage(width: width, height: height)
+                let source = try imageFromRGBX(scrambleRows(pixels, width: width, height: height, segmentationCount: count), width: width, height: height)
+                for data in [try XCTUnwrap(source.pngData()), try XCTUnwrap(source.jpegData(compressionQuality: 0.96))] {
+                    // Compare against decoded CDN pixels, never against the
+                    // pristine pre-JPEG source: the client cannot undo JPEG.
+                    let expected = unscrambleRows(
+                        try normalizedPixels(ImageScrambler.rasterImage(from: data)),
+                        width: width, height: height, segmentationCount: count
+                    )
+                    let online = try ImageScrambler.decodeImage(data, scrambleID: 220_980, photoID: photoID, filename: "00001.jpg")
+                    XCTAssertEqual(online.cgImage?.width, width)
+                    XCTAssertEqual(online.cgImage?.height, height)
+                    assertSamePixels(try normalizedPixels(online), expected)
+                    let stored = try ImageScrambler.decode(data, scrambleID: 220_980, photoID: photoID, filename: "00001.jpg")
+                    XCTAssertEqual(stored.fileExtension, "png")
+                    XCTAssertTrue(stored.data.starts(with: [0x89, 0x50, 0x4E, 0x47]))
+                    let offline = try ImageScrambler.rasterImage(from: stored.data)
+                    XCTAssertEqual(offline.cgImage?.width, width)
+                    XCTAssertEqual(offline.cgImage?.height, height)
+                    assertSamePixels(try normalizedPixels(online), try normalizedPixels(offline))
+                }
+            }
+        }
+    }
+
+    func testSyntheticWebPDefaultIsExactAndStorageUsesRealFormat() throws {
+        // Pillow RGB 13x53, eight reversed strips, quality=90. Generated from
+        // the same coloured-stroke pattern as colourDetailPage; no real page.
+        let data = try XCTUnwrap(Data(base64Encoded: "UklGRoADAABXRUJQVlA4IHQDAAAwGACdASoNADUAPi0QhkKhoQ36AAwBYlsAJ0yhHq3nf5AcpQ4bwI09/ZvYBtgP1V9QH6ef3b+q+9B6APOq6gD0AP0A9Kr/He4T+zv+1/w/tI3Zf8g/En9mew+8M+sWSs+sePn87/IDgK/078kNkB4i/xX+Pfjp5Vv7d3gP6B6B3+O1gj+Qf4D9Hf9J7XP6h+Rv9d9lnxv/hPzA+ST+Z/37+r/uR/cP//4K/0z9h/9IywGoBl979Km/5eKaRcLaj++qz2FgDi/53EsAAP7VrFr3l1QnFHRsRrBk7y3KgziziH+YRHy9EJYW8QWNmunD7qLuXh8miIlquNmY2LDV8lEUPgPeYqrY3JzID5VjHEgTIncwl0puHxj4w8MSN4qMgcPdfGw/w4V/tyrT0rJJ0PebDLRl3H2NDl61CoJBlZUbMgj+NPStQSre/Fpql7iOIMzj4H2z/53oYcOm0B99V9HAhd5oDM4cXSE6uxWyzy5f4AQfvw+40Pu8AkX0AaSkpIyCsD2jKJtsJgLvPLQkxkhoaEL0Yh8+95U5Mf94UwhldE8DkbGra/rYYT9/1wUzDu3d4Z7O9MARU98J4vPr+YUAU0v+5LnObHX+nxAbEF6yAud/QP6Q0hDtjhLNniOfKJNKDCIDXysvCxs3AiGVz//xlh39Zo4Eo9UHxeoPQ6s/4jkXIqlbTHqJzhEZgkWB56vwr6SiiE856Z9USzb6gHrPrgSLZyawO4kgVkpC5XJA3/ta30gOYhkf+JdkhlRVekNSSsuD1rrZqRNxmm2tzY31QjerBWle4rxauyp+UeZhHxrCrP7pi2xewaAQwO2BHJKG3rbVfygh2vYlUymtCVb34tNUvcRxBmclmfUWxLj5sOz0RLtQOROflrwrcgYgX1QukkB//astM+EdSe9RTXW5wcmUv381YvZx5nImbA0h6tJuuTkXJ2eOSy4Q85O6X/wGno3La1BGSypY5sFR7j538XmUPa6BBDYjrLWLf+m7J9Cvh74nMoDiihTIyF22IxV4e5ItSqDTGD5XJhHu37MVlU2kuB96edvHqtnpPqZpq3t9Tazz/1y/lxoulibitrct5NNSjEqD5FaN6MAaH1+bAagy3Z/dKKM9ntiXDVrS2AzIt+X8+Jt0K1b+Y4/+7l4kq7Ah/twmb0/EOiL/jAOY43AAAA=="))
+        let source = try ImageScrambler.rasterImage(from: data)
+        let expected = unscrambleRows(try normalizedPixels(source), width: 13, height: 53, segmentationCount: 8)
+        let online = try ImageScrambler.decodeImage(data, scrambleID: 220_980, photoID: "1452616", filename: "00001.webp")
+        assertSamePixels(try normalizedPixels(online), expected)
+        let repaired = try ImageScrambler.decodeImage(data, scrambleID: 220_980, photoID: "1452616", filename: "00001.webp", processing: .repairChroma)
+        XCTAssertFalse(try normalizedPixels(repaired).elementsEqual(expected))
+        let stored = try ImageScrambler.decode(data, scrambleID: 220_980, photoID: "1452616", filename: "00001.webp")
+        XCTAssertEqual(stored.fileExtension, "png")
+        assertSamePixels(try normalizedPixels(online), try normalizedPixels(ImageScrambler.rasterImage(from: stored.data)))
+        let original = try ImageScrambler.decode(data, scrambleID: 100, photoID: "99", filename: "wrong.jpg")
+        XCTAssertEqual(original.fileExtension, "webp")
+        XCTAssertEqual(original.data, data)
+    }
+
+    func testUnprocessedOriginalBytesAndExplicitJPEGStorage() throws {
+        let source = try imageFromRGBX(colourDetailPage(width: 37, height: 173), width: 37, height: 173)
+        for (data, ext) in [(try XCTUnwrap(source.pngData()), "png"), (try XCTUnwrap(source.jpegData(compressionQuality: 0.96)), "jpg")] {
+            let stored = try ImageScrambler.decode(data, scrambleID: 100, photoID: "99", filename: "mislabelled.webp")
+            XCTAssertEqual(stored.data, data)
+            XCTAssertEqual(stored.fileExtension, ext)
+        }
+        let jpeg = try XCTUnwrap(source.jpegData(compressionQuality: 0.96))
+        let stored = try ImageScrambler.decode(jpeg, scrambleID: 220_980, photoID: "1452616", filename: "00001.jpg", storage: .spaceSavingJPEG)
+        XCTAssertEqual(stored.fileExtension, "jpg")
+        XCTAssertTrue(stored.data.starts(with: [0xFF, 0xD8, 0xFF]))
+        XCTAssertEqual(try ImageScrambler.rasterImage(from: stored.data).cgImage?.height, 173)
+    }
+
+    func testLosslessPagePreservesAlphaAndRGBProfile() throws {
+        let width = 19, height = 83
+        var pixels = colourDetailPage(width: width, height: height)
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            let alpha: UInt8 = offset % 3 == 0 ? 0 : 128
+            for channel in 0..<3 { pixels[offset + channel] = UInt8(Int(pixels[offset + channel]) * Int(alpha) / 255) }
+            pixels[offset + 3] = alpha
+        }
+        let scrambled = scrambleRows(pixels, width: width, height: height, segmentationCount: 8)
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(scrambled) as CFData))
+        let cgImage = try XCTUnwrap(CGImage(
+            width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+            space: CGColorSpace(name: CGColorSpace.displayP3)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+        ))
+        let data = try XCTUnwrap(UIImage(cgImage: cgImage).pngData())
+        let expected = unscrambleRows(try normalizedPixels(ImageScrambler.rasterImage(from: data)), width: width, height: height, segmentationCount: 8)
+        let online = try ImageScrambler.decodeImage(data, scrambleID: 220_980, photoID: "1452616", filename: "00001.png")
+        assertSamePixels(try normalizedPixels(online), expected)
+        let stored = try ImageScrambler.decode(data, scrambleID: 220_980, photoID: "1452616", filename: "00001.png", storage: .spaceSavingJPEG)
+        XCTAssertEqual(stored.fileExtension, "png", "JPEG must not flatten transparent pages")
+        assertSamePixels(try normalizedPixels(online), try normalizedPixels(ImageScrambler.rasterImage(from: stored.data)))
+    }
+
+    @MainActor
+    func testOnlineInFlightPoliciesStaySeparateAndMatchLosslessDownload() async throws {
+        let width = 37, height = 173
+        let source = try imageFromRGBX(scrambleRows(colourDetailPage(width: width, height: height), width: width, height: height, segmentationCount: 8), width: width, height: height)
+        let data = try XCTUnwrap(source.jpegData(compressionQuality: 0.96))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PageFixtureURLProtocol.self]
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); PageFixtureURLProtocol.handle = nil }
+        let api = APIClient(
+            secureStore: PageFixtureSecureStore(),
+            configuration: AppConfiguration(apiDomains: [], imageDomains: ["https://page-fixture.invalid"], appVersion: "test"),
+            session: session,
+            requiresBootstrap: false
+        )
+        let chapter = ChapterDetail(json: ["id": "1452616", "images": ["00001.jpg"]], scrambleID: 220_980)
+        let oldStarted = expectation(description: "repair request started")
+        let newStarted = expectation(description: "faithful request started")
+        var requests: [PageFixtureURLProtocol] = []
+        PageFixtureURLProtocol.handle = { request in
+            DispatchQueue.main.async {
+                requests.append(request)
+                if requests.count == 1 { oldStarted.fulfill() }
+                if requests.count == 2 { newStarted.fulfill() }
+            }
+        }
+        let old = Task { try await api.decodedPageImage(chapter: chapter, index: 0, processing: .repairChroma) }
+        await fulfillment(of: [oldStarted], timeout: 3)
+        let current = Task { try await api.decodedPageImage(chapter: chapter, index: 0, processing: .faithful) }
+        // Respect a user's one-request concurrency setting as well. Both
+        // strategies are in flight even if the second transport is queued.
+        let transportsOverlap = DownloadConcurrencyPreferences.cachedImageRequests() > 1
+        if !transportsOverlap { requests[0].respond(data) }
+        await fulfillment(of: [newStarted], timeout: 3)
+        guard requests.count == 2 else { old.cancel(); current.cancel(); return }
+        requests[1].respond(data)
+        let faithful = try await current.value
+        // Complete the old strategy last, as when a settings change races I/O.
+        if transportsOverlap { requests[0].respond(data) }
+        let repaired = try await old.value
+        let cachedFaithful = try await api.decodedPageImage(chapter: chapter, index: 0, processing: .faithful)
+        let cachedRepaired = try await api.decodedPageImage(chapter: chapter, index: 0, processing: .repairChroma)
+        XCTAssertTrue(cachedFaithful === faithful)
+        XCTAssertTrue(cachedRepaired === repaired)
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertFalse(try normalizedPixels(faithful).elementsEqual(normalizedPixels(repaired)))
+        let download = try ImageScrambler.decode(data, scrambleID: chapter.scrambleID, photoID: chapter.id, filename: chapter.images[0])
+        let offline = try ImageScrambler.rasterImage(from: download.data)
+        XCTAssertEqual(faithful.size, offline.size)
+        assertSamePixels(try normalizedPixels(faithful), try normalizedPixels(offline))
+    }
+
+    private func colourDetailPage(width: Int, height: Int) -> [UInt8] {
+        var pixels = [UInt8](repeating: 255, count: width * height * 4)
+        let colours: [[UInt8]] = [[240, 12, 35], [16, 220, 80], [35, 60, 245], [245, 210, 20]]
+        for y in 0..<height {
+            for x in 0..<width {
+                // Thin horizontal colour strokes and repeating text-like
+                // stems/crossbars intentionally run through strip boundaries.
+                let colour = (y % 3 == 0 || x % 9 == 2 || (y % 7 == 1 && x % 9 < 7))
+                    ? colours[(y + x / 9) % colours.count] : [235, 235, 235]
+                for c in 0..<3 { pixels[(y * width + x) * 4 + c] = colour[c] }
+            }
+        }
+        return pixels
+    }
+
+    private func normalizedPixels(_ image: UIImage) throws -> [UInt8] {
+        let source = try XCTUnwrap(image.cgImage)
+        var pixels = [UInt8](repeating: 0, count: source.width * source.height * 4)
+        try pixels.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(
+                data: bytes.baseAddress, width: source.width, height: source.height,
+                bitsPerComponent: 8, bytesPerRow: source.width * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+            ))
+            context.setBlendMode(.copy)
+            context.interpolationQuality = .none
+            context.draw(source, in: CGRect(x: 0, y: 0, width: source.width, height: source.height))
+        }
+        return pixels
+    }
+
+    private func assertSamePixels(_ actual: [UInt8], _ expected: [UInt8], file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(actual.count, expected.count, file: file, line: line)
+        if let mismatch = zip(actual, expected).enumerated().first(where: { $0.element.0 != $0.element.1 }) {
+            XCTFail("Pixel byte \(mismatch.offset): \(mismatch.element.0) != \(mismatch.element.1)", file: file, line: line)
+        }
     }
 
     private func smoothColourPage(width: Int, height: Int) -> [UInt8] {
@@ -2747,17 +2922,81 @@ final class JMComicTests: XCTestCase {
             imageDomains: ["https://image.invalid"],
             domainIndex: 0,
             referer: "https://api.invalid",
-            attemptID: "attempt-uuid"
+            attemptID: "attempt-uuid",
+            imageProcessing: .repairChroma,
+            imageStorage: .spaceSavingJPEG
         )
         let encoded = try JSONEncoder().encode(descriptor)
-        XCTAssertEqual(try JSONDecoder().decode(PageDownloadDescriptor.self, from: encoded).attemptToken, "attempt-uuid")
+        let restored = try JSONDecoder().decode(PageDownloadDescriptor.self, from: encoded)
+        XCTAssertEqual(restored.attemptToken, "attempt-uuid")
+        XCTAssertEqual(restored.imageProcessing, .repairChroma)
+        XCTAssertEqual(restored.imageStorage, .spaceSavingJPEG)
 
         var legacyObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         legacyObject.removeValue(forKey: "attemptID")
+        legacyObject.removeValue(forKey: "imageProcessing")
+        legacyObject.removeValue(forKey: "imageStorage")
         let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
         let legacy = try JSONDecoder().decode(PageDownloadDescriptor.self, from: legacyData)
         XCTAssertNil(legacy.attemptID)
+        XCTAssertNil(legacy.imageProcessing)
+        XCTAssertNil(legacy.imageStorage)
         XCTAssertEqual(legacy.attemptToken, "legacy:comic:chapter")
+    }
+
+    func testPageStoragePreferencesAndMixedLegacyLibrary() throws {
+        let suite = "PageStorageTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(PageImagePreferences.processing(defaults: defaults), .faithful)
+        XCTAssertEqual(PageImagePreferences.storage(defaults: defaults), .lossless)
+        defaults.set(true, forKey: PageImagePreferences.repairChromaKey)
+        defaults.set(PageImageStorage.spaceSavingJPEG.rawValue, forKey: PageImagePreferences.storageKey)
+        let capturedProcessing = PageImagePreferences.processing(defaults: defaults)
+        let capturedStorage = PageImagePreferences.storage(defaults: defaults)
+        defaults.set(false, forKey: PageImagePreferences.repairChromaKey)
+        defaults.set(PageImageStorage.lossless.rawValue, forKey: PageImagePreferences.storageKey)
+        XCTAssertEqual(capturedProcessing, .repairChroma)
+        XCTAssertEqual(capturedStorage, .spaceSavingJPEG)
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try OfflineLibraryDatabase(databaseURL: root.appendingPathComponent("library.db"))
+        let comic = ComicSummary(id: "synthetic", name: "Synthetic")
+        let chapter = Chapter(id: "1452616", title: "Strips", sort: 1)
+        try database.upsertComic(comic, storageDirectoryName: "pages")
+        try database.upsertChapter(comicID: comic.id, chapter: chapter, expectedPageCount: 2)
+        let original = try imageFromRGBX(colourDetailPage(width: 37, height: 173), width: 37, height: 173)
+        let legacy = try XCTUnwrap(original.jpegData(compressionQuality: 0.96))
+        let legacyPath = "legacy.jpg"
+        try legacy.write(to: root.appendingPathComponent(legacyPath))
+        try database.upsertPage(chapterID: chapter.id, pageIndex: 0, globalOrdinal: 1, relativePath: legacyPath)
+        let descriptor = PageDownloadDescriptor(
+            comic: comic, chapterID: chapter.id, chapterTitle: chapter.title, chapterSort: 1,
+            scrambleID: 220_980, filename: "00001.jpg", pageIndex: 1, globalOrdinal: 2, totalPages: 2,
+            relativePath: "page-2.jpg", imageDomains: [], domainIndex: 0, referer: "", attemptID: "fixture",
+            imageProcessing: PageImagePreferences.processing(defaults: defaults),
+            imageStorage: PageImagePreferences.storage(defaults: defaults)
+        )
+        let encoded = try ImageScrambler.decode(legacy, scrambleID: descriptor.scrambleID, photoID: descriptor.chapterID, filename: descriptor.filename, processing: descriptor.imageProcessing!, storage: descriptor.imageStorage!)
+        let stored = descriptor.storing(encoded)
+        XCTAssertEqual(stored.relativePath, "page-2.png")
+        try database.reservePage(chapterID: chapter.id, pageIndex: 1, globalOrdinal: 2, relativePath: stored.relativePath)
+        let destination = root.appendingPathComponent(stored.relativePath)
+        try encoded.data.write(to: destination, options: .atomic)
+        try database.upsertPage(chapterID: chapter.id, pageIndex: 1, globalOrdinal: 2, relativePath: stored.relativePath)
+        let records = try database.pageRecords(comicID: comic.id, chapterID: chapter.id)
+        XCTAssertEqual(records.map(\.relativePath), [legacyPath, "page-2.png"])
+        XCTAssertTrue(records.allSatisfy(\.completed))
+        for record in records {
+            let bytes = try Data(contentsOf: root.appendingPathComponent(record.relativePath))
+            let image = try ImageScrambler.rasterImage(from: bytes)
+            XCTAssertEqual(image.cgImage?.width, 37)
+            XCTAssertEqual(image.cgImage?.height, 173)
+        }
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(legacyPath)), legacy)
+        XCTAssertTrue(DownloadStorageNaming.pageFileName(comicName: String(repeating: "长", count: 100), imageNumber: 2, fileExtension: "png").hasSuffix(".png"))
     }
 
     func testCompletedPathMigrationRollsBackWhenSQLiteCommitFails() throws {
@@ -3990,5 +4229,26 @@ private final class MutableKeychainAccess: KeychainAccessing {
     func delete(service: String, account: String) -> OSStatus {
         values.removeValue(forKey: "\(service):\(account)")
         return errSecSuccess
+    }
+}
+
+/// Synthetic page responses only; never reads a user's account or CDN content.
+private final class PageFixtureSecureStore: SecureDataStoring {
+    func save(_ data: Data, account: String) throws -> KeychainStore.StorageLocation { .protectedFile }
+    func load(account: String) -> Data? { nil }
+    func delete(account: String) {}
+}
+
+private final class PageFixtureURLProtocol: URLProtocol {
+    static var handle: ((PageFixtureURLProtocol) -> Void)?
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { Self.handle?(self) }
+    override func stopLoading() {}
+    func respond(_ data: Data) {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "image/jpeg"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
     }
 }

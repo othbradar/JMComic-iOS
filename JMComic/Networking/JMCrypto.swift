@@ -71,6 +71,11 @@ enum JMCrypto {
 }
 
 enum ImageScrambler {
+    struct EncodedPage {
+        let data: Data
+        let fileExtension: String
+    }
+
     static func segmentationCount(scrambleID: Int, photoID: Int, filename: String) -> Int {
         guard photoID >= scrambleID else { return 0 }
         guard let last = JMCrypto.md5("\(photoID)\(filename)").utf8.last else { return 0 }
@@ -80,24 +85,38 @@ enum ImageScrambler {
         )
     }
 
-    static func decode(_ data: Data, scrambleID: Int, photoID: String, filename: String) throws -> Data {
+    static func decode(
+        _ data: Data,
+        scrambleID: Int,
+        photoID: String,
+        filename: String,
+        processing: PageImageProcessing = .faithful,
+        storage: PageImageStorage = .lossless
+    ) throws -> EncodedPage {
         let count = segmentationCount(
             scrambleID: scrambleID,
             photoID: Int(photoID) ?? 0,
             filename: (filename as NSString).deletingPathExtension
         )
-        guard count > 0 else { return data }
-
         let result = try decodeImage(
             data,
             scrambleID: scrambleID,
             photoID: photoID,
-            filename: filename
+            filename: filename,
+            processing: processing
         )
-        guard let encoded = result.jpegData(compressionQuality: 0.96) else {
+        // Validate/decode with the same ImageIO path used by the reader, then
+        // keep supported original bytes when no pixel processing is needed.
+        if count == 0, storage == .lossless,
+           let fileExtension = originalFileExtension(data) {
+            return EncodedPage(data: data, fileExtension: fileExtension)
+        }
+        let useJPEG = storage == .spaceSavingJPEG && !hasAlpha(result.cgImage)
+        let encoded = useJPEG ? result.jpegData(compressionQuality: 0.96) : result.pngData()
+        guard let encoded else {
             throw ImageError.encodeFailed
         }
-        return encoded
+        return EncodedPage(data: encoded, fileExtension: useJPEG ? "jpg" : "png")
     }
 
     /// 阅读器直接使用解扰后的像素图，避免先 JPEG 编码、随后又解码的两次 CPU 和内存峰值。
@@ -105,7 +124,8 @@ enum ImageScrambler {
         _ data: Data,
         scrambleID: Int,
         photoID: String,
-        filename: String
+        filename: String,
+        processing: PageImageProcessing = .faithful
     ) throws -> UIImage {
         let source = try rasterImage(from: data)
         guard let cgImage = source.cgImage else { throw ImageError.invalidImage }
@@ -119,21 +139,13 @@ enum ImageScrambler {
         return try decodeScrambledPixels(
             cgImage,
             segmentationCount: count,
-            repairLossySeams: isLossyEncodedImage(data)
+            repairLossySeams: processing == .repairChroma && isLossyEncodedImage(data)
         )
     }
 
-    /// The CDN encodes the already-scrambled strips as a single lossy WebP/JPEG.
-    /// Its chroma upsampling therefore mixes colours across neighbours which are
-    /// unrelated in the real page.  Reversing the strips exposes that pollution
-    /// as the periodic horizontal lines which are especially visible on iPad.
-    ///
-    /// Work in one full-resolution RGB bitmap, reverse complete scanlines (never
-    /// resample a strip), then reconstruct only the chroma in a four-row band at
-    /// every known join.  The target row's luminance is retained, so line art and
-    /// text stay sharp while the false coloured seam is removed.  Reader and
-    /// download paths both call this routine, preventing the defect from being
-    /// baked into the visible Documents JPEGs.
+    /// Reverse complete scanlines without resampling. The optional legacy
+    /// chroma interpolation can also alter legitimate coloured details: codec
+    /// and dimensions are eligibility checks, not evidence of a damaged seam.
     private static func decodeScrambledPixels(
         _ source: CGImage,
         segmentationCount count: Int,
@@ -163,14 +175,13 @@ enum ImageScrambler {
                     height: height,
                     bitsPerComponent: 8,
                     bytesPerRow: bytesPerRow,
-                    space: CGColorSpaceCreateDeviceRGB(),
+                    space: source.colorSpace?.model == .rgb
+                        ? source.colorSpace! : CGColorSpace(name: CGColorSpace.sRGB)!,
                     bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
-                        | CGImageAlphaInfo.noneSkipLast.rawValue
+                        | (hasAlpha(source) ? CGImageAlphaInfo.premultipliedLast : .noneSkipLast).rawValue
                   ) else { return nil }
 
             let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-            context.setFillColor(CGColor(gray: 1, alpha: 1))
-            context.fill(bounds)
             context.setBlendMode(.copy)
             context.interpolationQuality = .none
             context.setShouldAntialias(false)
@@ -215,7 +226,8 @@ enum ImageScrambler {
                     bytesPerRow: bytesPerRow,
                     segmentationCount: count,
                     baseHeight: baseHeight,
-                    remainder: remainder
+                    remainder: remainder,
+                    hasAlpha: hasAlpha(source)
                 )
             }
             return context.makeImage()
@@ -255,7 +267,8 @@ enum ImageScrambler {
         bytesPerRow: Int,
         segmentationCount count: Int,
         baseHeight: Int,
-        remainder: Int
+        remainder: Int,
+        hasAlpha: Bool
     ) {
         let bytes = baseAddress.assumingMemoryBound(to: UInt8.self)
         let anchorDistance = 5
@@ -275,6 +288,11 @@ enum ImageScrambler {
 
                 for x in 0..<width {
                     let offset = x * 4
+                    // Interpolation expects opaque RGB; do not reconstruct
+                    // premultiplied colours across a transparency boundary.
+                    if hasAlpha, top[offset + 3] != 255 || bottom[offset + 3] != 255 || target[offset + 3] != 255 {
+                        continue
+                    }
                     let originalR = Double(target[offset])
                     let originalG = Double(target[offset + 1])
                     let originalB = Double(target[offset + 2])
@@ -300,8 +318,27 @@ enum ImageScrambler {
         UInt8(max(0, min(255, Int(value.rounded()))))
     }
 
+    private static func hasAlpha(_ image: CGImage?) -> Bool {
+        guard let image else { return false }
+        switch image.alphaInfo {
+        case .first, .last, .premultipliedFirst, .premultipliedLast, .alphaOnly: return true
+        default: return false
+        }
+    }
+
+    private static func originalFileExtension(_ data: Data) -> String? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) as String? else { return nil }
+        switch type {
+        case "public.jpeg": return "jpg"
+        case "public.png": return "png"
+        case "org.webmproject.webp": return "webp"
+        default: return nil // Other readable sources are stored as PNG.
+        }
+    }
+
     /// Lossless containers do not have cross-strip codec pollution and should
-    /// remain byte-for-byte sharp.  Apply the repair only to the two lossy page
+    /// remain byte-for-byte sharp. When explicitly enabled, limit repair to the two lossy page
     /// codecs observed from JM's CDN: JPEG and VP8 WebP.  Unknown formats stay
     /// untouched instead of risking a needless four-row colour modification.
     private static func isLossyEncodedImage(_ data: Data) -> Bool {

@@ -554,6 +554,7 @@ private struct ReaderScrollDirectionConfigurator: UIViewRepresentable {
 
 private struct OnlinePageView: View {
     @EnvironmentObject private var api: APIClient
+    @AppStorage(PageImagePreferences.repairChromaKey) private var repairChroma = false
     let chapter: ChapterDetail
     let index: Int
     @State private var image: UIImage?
@@ -583,13 +584,14 @@ private struct OnlinePageView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .task(id: "\(chapter.id)|\(index)|\(retryID)") {
+        .task(id: "\(chapter.id)|\(index)|\(retryID)|\(repairChroma)") {
+            let processing: PageImageProcessing = repairChroma ? .repairChroma : .faithful
             do {
-                let value = try await api.decodedPageImage(chapter: chapter, index: index)
+                let value = try await api.decodedPageImage(chapter: chapter, index: index, processing: processing)
                 guard !Task.isCancelled else { return }
                 image = value
                 error = nil
-                api.prefetchDecodedPages(chapter: chapter, after: index)
+                api.prefetchDecodedPages(chapter: chapter, after: index, processing: processing)
             } catch {
                 // LazyVStack/TabView 回收页面时的取消是正常生命周期，不应显示 cancelled。
                 guard !APIClient.isCancellation(error), !Task.isCancelled else { return }

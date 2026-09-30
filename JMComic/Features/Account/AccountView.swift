@@ -791,6 +791,8 @@ struct SettingsView: View {
     private var simultaneousComics = DownloadConcurrencyPreferences.defaultSimultaneousComics
     @AppStorage(DownloadConcurrencyPreferences.pageDownloadsPerComicKey)
     private var pageDownloadsPerComic = DownloadConcurrencyPreferences.defaultPageDownloadsPerComic
+    @AppStorage(PageImagePreferences.repairChromaKey) private var repairChroma = false
+    @AppStorage(PageImagePreferences.storageKey) private var pageImageStorage = PageImageStorage.lossless.rawValue
 
     var body: some View {
         Form {
@@ -941,6 +943,30 @@ struct SettingsView: View {
                 }
                 if showsExplanatoryText {
                     Text("API 接口决定业务请求域名；图片线路 1–4 会作为 app_img_shunt 发送，并使用该线路返回的图片主机。线路失效时仍会自动尝试备用 CDN。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("阅读图片与下载画质") {
+                Toggle("尝试修复色缝", isOn: $repairChroma)
+                    .accessibilityIdentifier("settings.repairChroma")
+                if showsExplanatoryText {
+                    Text("默认仅精确还原条带。色缝修复会修改接缝附近的颜色，可能改变细线和文字细节；开启后用于在线阅读与新下载。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Picker("完整阅读图片保存", selection: $pageImageStorage) {
+                    ForEach(PageImageStorage.allCases, id: \.rawValue) { format in
+                        Text(format.title).tag(format.rawValue)
+                    }
+                }
+                .accessibilityIdentifier("settings.pageImageStorage")
+                if showsExplanatoryText {
+                    Text("保真保存会保留无需处理的原文件，处理后使用无损 PNG；省空间使用 JPEG 0.96（含透明度时仍用 PNG）。保真只避免客户端额外损失，不能恢复 CDN 已丢失的细节。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Text("下载设置在加入任务时确定，切换后不改变进行中的任务。已有下载继续可读，不会转换或自动重新下载。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
