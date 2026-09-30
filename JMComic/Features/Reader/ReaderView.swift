@@ -426,7 +426,7 @@ private struct ContinuousReaderSurface<Page: View>: View {
                 zoom.viewportChanged(to: size)
             }
             .onScrollPhaseChange { _, phase in
-                if phase == .interacting { zoom.beginPan() }
+                zoom.scrollPhaseChanged(phase)
             }
             .task(id: pageCount) {
                 guard pageCount > 0 else { return }
@@ -500,7 +500,9 @@ struct ReaderContinuousRow<Content: View>: View {
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                 if height > 0, baseHeight != height {
-                    zoom.pageSizeWillChange(index: index)
+                    // A newly realized lazy row is not a change to a measured
+                    // page. Do not arm scroll compensation on its first layout.
+                    if baseHeight != nil { zoom.pageSizeWillChange(index: index) }
                     baseHeight = height
                 }
             }
@@ -563,6 +565,9 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
     private var viewport = CGSize.zero
     private var anchor: Anchor?
     private var restingAnchor: Anchor?
+    private var lastAdjustedOffset: CGPoint?
+    private var passiveAdjustmentOffset: CGPoint?
+    private var userScrollInProgress = false
     private var startScale: CGFloat?
     private var pendingScale: CGFloat?
     private var animation: (start: CGFloat, end: CGFloat, time: CFTimeInterval)?
@@ -599,6 +604,7 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
             refreshFrames()
             anchor = capture(at: focus)
             guard anchor != nil else { return }
+            passiveAdjustmentOffset = nil
             startScale = scale
             isAdjustingFocus = true
             finishAfterLayout = false
@@ -623,6 +629,7 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
         refreshFrames()
         anchor = capture(at: focus)
         guard anchor != nil else { return }
+        passiveAdjustmentOffset = nil
         isAdjustingFocus = true
         finishAfterLayout = false
         animation = (scale, scale > 1.01 ? 1 : 2, CACurrentMediaTime())
@@ -632,13 +639,33 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
     func beginPan() {
         guard startScale == nil else { return }
         stopFrames()
+        releaseAnchor()
+    }
+
+    func scrollPhaseChanged(_ phase: ScrollPhase) {
+        userScrollInProgress = phase != .idle
+        if phase == .tracking || phase == .interacting || phase == .animating { beginPan() }
+        if phase == .idle { didScroll() }
+    }
+
+    private var isUserScrolling: Bool {
+        userScrollInProgress || scrollView?.isTracking == true
+            || scrollView?.isDragging == true || scrollView?.isDecelerating == true
+    }
+
+    private func releaseAnchor() {
         anchor = nil
+        lastAdjustedOffset = nil
+        passiveAdjustmentOffset = nil
         finishAfterLayout = false
         isAdjustingFocus = false
     }
 
     func didScroll() {
         guard !isAdjustingFocus else { return }
+        // Retain a zoom anchor for late layout only while the scroll position
+        // is still the one we applied. A later drag/deceleration owns its offset.
+        if scrollView?.contentOffset != lastAdjustedOffset { releaseAnchor() }
         refreshFrames()
         restingAnchor = capture(at: CGPoint(x: viewport.width / 2, y: viewport.height / 2))
     }
@@ -653,6 +680,7 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
         let retained = isAdjustingFocus ? anchor : restingAnchor
         stopFrames()
         startScale = nil
+        passiveAdjustmentOffset = nil
         if var retained {
             retained.focus = CGPoint(x: size.width / 2, y: size.height / 2)
             anchor = retained
@@ -663,8 +691,10 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
     }
 
     func pageSizeWillChange(index: Int) {
-        guard !isAdjustingFocus, let restingAnchor,
+        guard !isAdjustingFocus, !isUserScrolling, let restingAnchor,
+              index <= restingAnchor.index,
               rows[restingAnchor.index] != nil else { return }
+        passiveAdjustmentOffset = scrollView?.contentOffset
         anchor = restingAnchor
         isAdjustingFocus = true
         finishAfterLayout = true
@@ -707,6 +737,14 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
 
     private func adjustFocus() {
         guard let scrollView else { return }
+        // A user/native scroll may move before SwiftUI delivers its phase or
+        // geometry callback. Never pull that newer position back on this turn.
+        if let passiveAdjustmentOffset,
+           isUserScrolling || passiveAdjustmentOffset != scrollView.contentOffset {
+            releaseAnchor()
+        } else if !isAdjustingFocus, scrollView.contentOffset != lastAdjustedOffset {
+            releaseAnchor()
+        }
         refreshFrames()
         if let anchor, let row = rows[anchor.index] {
             let offset = ReaderZoomGeometry.scrollOffset(
@@ -718,12 +756,14 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
                 || abs(offset.y - scrollView.contentOffset.y) > 0.25 {
                 scrollView.setContentOffset(offset, animated: false)
             }
+            lastAdjustedOffset = scrollView.contentOffset
         }
         if finishAfterLayout {
             finishAfterLayout = false
             isAdjustingFocus = false
-            // Keep the page anchor through final lazy layout corrections. A new
-            // pan drops it immediately, so normal scrolling never fights it.
+            passiveAdjustmentOffset = nil
+            // Late zoom layout can retain the anchor until scrolling moves;
+            // didScroll/adjustFocus release it before using any newer offset.
         }
         if !isAdjustingFocus { didScroll() }
     }
@@ -771,7 +811,8 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
         if let oldMaximumTouches { scrollView?.panGestureRecognizer.maximumNumberOfTouches = oldMaximumTouches }
         scrollView = nil
         rows.removeAll()
-        anchor = nil
+        releaseAnchor()
+        userScrollInProgress = false
         restingAnchor = nil
         startScale = nil
     }

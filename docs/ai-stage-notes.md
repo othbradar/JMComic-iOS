@@ -244,3 +244,47 @@ xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobil
 - GitHub CLI 未登录；使用已登录的 Chrome 仓库发布表单选择现有 v1.0.2 标签、填写更新说明、上传上述 IPA 并发布为 Latest。公开发布页：<https://github.com/othbradar/JMComic-iOS/releases/tag/v1.0.2>，发布时间 2026-09-30T07:23:22Z。
 - 实际执行 `curl -fsSL 'https://api.github.com/repos/othbradar/JMComic-iOS/releases/tags/v1.0.2' -o Artifacts/v1.0.2/published-release.json` 及 `/releases/latest` 核验：非草稿、非预发布，Latest 为 v1.0.2；公开正文与本地 `RELEASE_NOTES.md` 标准化换行后完全一致。
 - 附件 ID `600291137`，状态 uploaded；服务器记录大小 2,418,352 字节，digest `sha256:760ce49983357ff2f35c61617c618913d5924ffaf56bae25528fdb280a32c2ef`，均与本地 IPA 一致。下载地址：<https://github.com/othbradar/JMComic-iOS/releases/download/v1.0.2/JMComic-v1.0.2-iOS18-arm64-UNSIGNED.ipa>。仅发布构建包，不含账号、下载内容、测试数据库或个人签名材料。
+
+## 2026-09-30：iOS 27 实机根 Tab 横滑白屏修复候选
+
+- 用户报告：原版模拟器正常；实机系统最终更正为 **iOS 27**。初装最初几次横滑正常，触发后横滑几乎必定只剩背景和底栏；直接点击底栏可恢复。截图显示中途两页仍可见、松手完成后内容区消失。本机只有 iOS 26.5 Simulator，**没有复现用户 iOS 27 实机故障，未宣称实机已修复**。
+- 基线 `da3623327479078711b8660f13536b290a093530`，当前分支 `codex/root-tab-resident-pages-v6`；`git status --short --branch` 干净。已核对 README、CONTRIBUTING、project.yml、`xcodebuild -list -project JMComic.xcodeproj`、`xcrun simctl list devices booted` / `list runtimes`。入口 `JMComicApp → ProtectedAppRoot → RootView → RootResidentPages`；LegacyRootView 未使用、未修改。
+- 定位的代码缺陷：RootResidentPageHostStore 把完整页面宿主插入 selectedView 的内部祖先容器，假定它在原生 Tab 切换中永远保留；内部容器退出时，子层 zPosition=100 也无法保住内容。新受控用例在旧代码下移除该容器，实际断言 host.window 丢失；这仅证明该生命周期缺陷，不能等同于已拿到 iOS 27 实机调用栈。
+- 小范围修正：页面宿主由窗口内对应 UITabBarController 根视图上的自有 MountView 持有，与可替换的内容容器并列，使用普通兄弟顺序保留系统标签栏/侧栏在上方。切换选中项、原生切换完成和尺寸变化时合并校正；只有尺寸/层级确实改变才写入，不再从 locator.layoutSubviews 强制祖先 layoutIfNeeded / 每次 setNeedsLayout。旧页的异步顶部 inset 回调不能更新新选中页。保留同一个 UIHostingController、五个常驻页、导航路径、图片策略及弹簧手势；未添加额外 tab child、静态全局宿主或重置页面身份。
+- Apple 文档核对：<https://developer.apple.com/documentation/uikit/uitabbarcontroller>、<https://developer.apple.com/documentation/uikit/uitabbarcontroller/contentlayoutguide>。iOS 27 相关论坛报告涉及旧 shouldSelect delegate，当前真实入口没有使用该 delegate，因此没有套用该线索。
+
+### 实际验证和产物
+
+- 定向回归：iPhone 6 项通过（2 个新宿主回归、4 个既有锁轴/取消/反向/生命周期用例），iPad 重复 2 个宿主回归通过。真实 SwiftUI TabView 的 14 次首次/重复/反向选中与尺寸变化中，同一宿主持续可见、可 hitTest；合成 StateObject 构造 / onAppear / task 均为 1 次。另一个用例覆盖旧内容容器被移除。仅合成文字和色块，无真实账号/漫画夹具。
+- 实际命令：`xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug -sdk iphonesimulator -destination 'id=<下列 UUID>' -derivedDataPath Artifacts/root-host-fix/DerivedData -parallel-testing-enabled NO -only-testing:JMComicTests/JMComicTests/<方法名> test`。方法完整参数与结果位于 `Artifacts/root-host-fix/tests-iphone-fixed.log`、`tests-ipad.log` 的开头。`before-fix.log` 保留旧实现的 2 条失败断言；首轮 `tests-iphone.log` 因合成计数器缺 MainActor 标记编译失败，补齐后上述测试通过。不把旧实现的受控失败称作实机复现。
+- 完整 Simulator App：`xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath build/root-host-fix CODE_SIGNING_ALLOWED=NO build > Artifacts/root-host-fix/simulator-build.log 2>&1` → BUILD SUCCEEDED。
+- 对 iPhone 17 Pro Max `88E155ED-2CC4-4266-8137-148FD7FBB757`、iPad Pro 11-inch (M5) `467D92A6-2187-48A6-BF24-9824B48313B1` 实际依次执行 `xcrun simctl terminate <UUID> io.github.jmcomic.mobile`、`install <UUID> /Users/othbradar/PycharmProjects/JMComic-iOS/build/root-host-fix/Build/Products/Debug-iphonesimulator/JMComic.app`、`launch <UUID> io.github.jmcomic.mobile`。命令与输出 `Artifacts/root-host-fix/install.log`。两端二进制摘要与最终产物一致；未卸载/清数据。容器 UUID 改变，iPad 25 个原下载文件/12,347,673 字节的相对路径和大小摘要一致；iPhone 原无下载仍无下载。汇总 `install-verification.json`。
+- CUA 基本检查：两端完整 App 启动、发现内容和系统 Tab 栏可见；iPad 点击搜索显示标题、搜索框和空状态，侧栏可展开/收起，未被新宿主遮住。iPhone CUA 两次 drag 没有产生可确认的切换，完整触摸横滑 smoke **未执行完成**；没有将模拟器无白屏计作 iOS 27 实机通过。
+- 真机候选：`xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Release -destination 'generic/platform=iOS' -sdk iphoneos -derivedDataPath Artifacts/root-host-fix/Device CODE_SIGNING_ALLOWED=NO build > Artifacts/root-host-fix/device-build.log 2>&1` → BUILD SUCCEEDED。沿用 1.0.2（23）/ iOS 18+ / `io.github.jmcomic.mobile`，未改签名配置。`lipo -archs`=arm64，`vtool -show-build`=IOS，SDK 26.5，`codesign -dv` 确认未签名。
+- 使用 Python zipfile 将 Release-iphoneos/JMComic.app 逐文件打入 Payload（忽略 AppleDouble），验证 CRC、版本、平台、主程序可执行权限及源文件字节一致。候选 IPA：`/Users/othbradar/PycharmProjects/JMComic-iOS/Artifacts/root-host-fix/JMComic-1.0.2-tab-host-fix-UNSIGNED.ipa`，2,423,663 字节，SHA-256 `424074439369627ccae07325ad7e15d63443673558d857f169af2d26c8435027`。汇总 `ipa-verification.json`。这是未发布的实机候选，不是 Simulator .app 改后缀。
+- 待用户实机检查：用原签名身份/原应用标识覆盖安装候选包，在 iOS 27 连续往返横滑、首次与重复访问所有 Tab、点击底栏后再滑动、拖动反向/取消，以及二级页返回后再滑动。无需卸载。实机白屏是否消失、触感/性能尚未验证；未执行真机安装或 iOS 27 runtime 测试。本批未提交、未推送、未替换公开 1.0.2 Release，等待人工验收。
+
+## 2026-09-30：收藏夹数量更新与连续阅读回跳
+
+- 用户已在 iOS 27 实机确认上一节的根 Tab 白屏候选修复有效；该未提交修改完整保留。本批起点 HEAD 仍为 `da3623327479078711b8660f13536b290a093530`，已有 RootView、测试及本记录修改，未覆盖或提交。重新核对 git status/HEAD、真实 scheme/构建入口和两端模拟器；沿用此前已读的 README、CONTRIBUTING、project.yml。
+- 收藏数量：确认 `FavoriteFolderContentModel → FavoriteCacheStore → SQLite` 会更新文件夹 total，但常驻 `FavoritesViewModel.folders` 只在账户任务加载时更新；手机 `.badge(Int)` 又会隐藏 0，使首次未带 count 的文件夹即使已完成内容加载仍不显示数字。现于缓存事务成功后通知小型文件夹元数据快照，在主线程更新对应账号的常驻列表；数量不变不重绘，退出/切换账号拒绝旧账号通知。手机使用文本 badge，也能显示真实空文件夹的 0。保留数据库对缺失 count 的元数据不覆盖已知总数的规则；没有添加逐文件夹请求或重拉全库，没有更改收藏远端接口/数据库结构。
+- 阅读回跳：确认 `pageSizeWillChange` 可在拖动/惯性期间重新设置旧 anchor，且完成尺寸补偿后 anchor 仍被后续每次 geometryChanged 使用，覆盖新 contentOffset。新增两条测试在旧实现真实失败：下滑 2500/2580/2660 被拉回 2400；拖动/惯性中 2450 被拉回 2300。此为受控代码路径复现，不宣称复现了实机所有时序。
+- 修正：跟踪 scroll phase，并同时检查 UIScrollView 的 tracking/dragging/decelerating；滚动中不重新启动图片尺寸的被动锚点补偿。排队补偿发现 contentOffset 已变化即放弃旧位置；完成缩放后仅在 offset 仍等于自己施加的值时保留锚点以吸收晚到布局。新懒加载行的首次测量、当前锚点之后的行不触发无关补偿。静止时图片尺寸补偿、偏心缩放/复位、旋转位置逻辑仍保留，没有降画质、关闭预取或重新构建阅读器。
+
+### 验证 / 交付
+
+- `Artifacts/favorites-reader-fix/before-fix.log`：两个新回跳测试在旧代码下失败（5 条 offset 断言），作为修复前证据。最终 `tests-iphone.log` 中 **8 项定向 XCTest 通过**：4 项新增（数量提交后即时更新/保留已知总数/变为空/账号隔离；补偿后的继续下滑；拖动与惯性图片到达；SwiftUI 回调晚于 native offset）与 4 项既有（静止占位锚点、偏心缩放/取消/尺寸改变、真实懒布局缩放焦点与有界行、收藏 SQLite 分页/账户隔离）。夹具仅合成页几何和独立临时数据库，无真实账号、凭据或私密漫画。
+- 测试命令：`xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug -sdk iphonesimulator -destination 'id=88E155ED-2CC4-4266-8137-148FD7FBB757' -derivedDataPath Artifacts/root-host-fix/DerivedData -parallel-testing-enabled NO -only-testing:JMComicTests/JMComicTests/<具体方法> test`；两份日志开头保留完整方法参数。没有跑全量测试或 Instruments，本批 iPad XCTest 未执行。
+- 完整 Simulator 构建：`xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug -destination 'generic/platform=iOS Simulator' -derivedDataPath build/root-host-fix CODE_SIGNING_ALLOWED=NO build > Artifacts/favorites-reader-fix/simulator-build.log 2>&1` → BUILD SUCCEEDED。
+- 真机 Release 构建：`xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Release -destination 'generic/platform=iOS' -sdk iphoneos -derivedDataPath Artifacts/root-host-fix/Device CODE_SIGNING_ALLOWED=NO build > Artifacts/favorites-reader-fix/device-build.log 2>&1` → BUILD SUCCEEDED。保持 1.0.2（23）、`io.github.jmcomic.mobile` 和原签名配置；仅构建命令使用 CODE_SIGNING_ALLOWED=NO。
+- 对 iPhone 17 Pro Max `88E155ED-2CC4-4266-8137-148FD7FBB757`、iPad Pro 11-inch (M5) `467D92A6-2187-48A6-BF24-9824B48313B1`，实际逐个执行 `simctl terminate`、`install <UUID> /Users/othbradar/PycharmProjects/JMComic-iOS/build/root-host-fix/Build/Products/Debug-iphonesimulator/JMComic.app`、`launch` 原 bundle ID；完整命令/输出 `Artifacts/favorites-reader-fix/install.log`。两端主程序/debug dylib 与产物摘要一致；没有卸载或清数据，容器 UUID 改变。iPad 25 个下载文件/12,347,673 字节相对路径与大小摘要保留，iPhone 原无下载仍无下载，见 `install-verification.json`。
+- CUA：iPad 完整 App 发现页启动及内容载入，点击收藏后既有收藏内容可见。iPhone 本批仅执行启动和安装产物校验；手机收藏夹计数 UI、长距离实际手势连续阅读/惯性与缩放后的手感未执行，留待 iOS 27 实机检查。没有用模拟器或代码测试宣称实机全部通过。
+- 实机候选包：`/Users/othbradar/PycharmProjects/JMComic-iOS/Artifacts/favorites-reader-fix/JMComic-1.0.2-favorites-reader-fix-UNSIGNED.ipa`。包含上一节已获实机确认的 Tab 白屏修复及本批两项修改。Python zipfile 将 Release-iphoneos/JMComic.app 逐文件装入 Payload；CRC、plist 版本/bundle/platform、可执行权限、包内与构建文件字节一致通过。`lipo -archs`=arm64，`vtool -show-build`=IOS / SDK 26.5，`codesign -dv`=未签名。大小 2,429,090 字节，SHA-256 `ab9101d1c9fc907047ae7a7fa973911c1786b23008492fd37d6893e3780cf985`，汇总 `ipa-verification.json`。不是 Simulator .app 改后缀；未替换公开 Release。
+- 待人工检查：使用原签名身份/原 bundle ID 覆盖安装候选包；进入一个自定义收藏夹加载后返回检查数量，重新打开仍应保留；连续阅读普通下滑、图片逐步加载、松手惯性、缩放后平移/复位。无需卸载清数据。`git diff --check` 通过；本批及上一节均未提交/推送，等用户验收。
+
+### 实机确认与替换 1.0.2 授权
+
+- 用户已明确确认根 Tab 白屏、收藏夹计数和连续阅读回跳修复，并授权提交、推送 GitHub、用新版 IPA 替换公开 1.0.2 附件。实机反馈为用户提供，未扩大为帧率/内存或全部流程验证。
+- 提交前 `git status --short`、`git diff --check`、`git ls-remote origin refs/heads/main refs/tags/v1.0.2 'refs/tags/v1.0.2^{}'` 核对：只有本次两组修复的 5 个文件；远端 main 仍为 `da36233`，采用快进推送。保留原 v1.0.2 标签，修订附件的准确源码提交将在发布正文单独链接。
+- 已确认的候选 IPA 原路径文件在发布时已不在项目内；保留的 Release-iphoneos/JMComic.app 仍完整。使用与前次相同的 Python zipfile（排序逐文件、DEFLATED level 9）重新打包到 `Artifacts/favorites-reader-fix/release/JMComic-v1.0.2-iOS18-arm64-UNSIGNED.ipa`，得到与已验收候选**完全相同**的 2,429,090 字节和 SHA-256 `ab9101d1c9fc907047ae7a7fa973911c1786b23008492fd37d6893e3780cf985`；CRC、7 个包内文件逐一对比及 plist 校验通过。未重新编译或修改程序，保持 1.0.2（23）/ 原 bundle ID / arm64 未签名。
+- 本次发布步骤沿用已记录的定向 XCTest、完整 App 构建安装及用户实机确认；未重复运行测试。`gh auth status` 未登录，使用已有 Chrome 登录会话更新同一发布页，不提取凭据。

@@ -5197,3 +5197,282 @@ extension JMComicTests {
         try await ExportFiles.shared.discard(id)
     }
 }
+
+
+/// Synthetic UIKit ownership changes, with no network or user data. The tab
+/// controller is allowed to retire its selected-content wrapper after layout.
+@MainActor
+private final class ResidentTestTabs: UITabBarController {
+    let placeholder = UIViewController()
+    let wrapper = UIView()
+    let locator = UIView()
+    override func loadView() { view = UIView() }
+    func prepare() {
+        loadViewIfNeeded()
+        view.frame = CGRect(x: 0, y: 0, width: 440, height: 956)
+        viewControllers = [placeholder]
+        placeholder.loadViewIfNeeded()
+        wrapper.frame = view.bounds
+        placeholder.view.frame = wrapper.bounds
+        view.addSubview(wrapper)
+        wrapper.addSubview(placeholder.view)
+        placeholder.view.addSubview(locator)
+    }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testResidentHostSurvivesRetiredNativeContentWrapper() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKey = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        let tabs = ResidentTestTabs()
+        window.rootViewController = tabs
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previousKey?.makeKey() }
+        tabs.prepare()
+        let store = RootResidentPageHostStore()
+        store.install(from: tabs.locator, content: AnyView(Text("Resident fixture")))
+        let hosted = try XCTUnwrap(store.hostingController?.view)
+        XCTAssertTrue(hosted.window === window)
+        // Matches the ordering at issue: the locator already ran, then UIKit
+        // retires that content wrapper at selection/transition completion.
+        tabs.wrapper.removeFromSuperview()
+        XCTAssertTrue(hosted.window === window, "Retiring a native tab wrapper must not remove the page deck")
+        XCTAssertTrue(hosted.superview?.superview === tabs.view, "Resident pages need an owner outside replaceable tab content")
+    }
+}
+
+@MainActor
+private final class ResidentSelectionFixture: ObservableObject {
+    @Published var tab: RootTab = .explore
+    var constructions = 0
+    var appearances = 0
+    var tasks = 0
+}
+
+@MainActor
+private final class ResidentLifetimeFixture: ObservableObject {
+    init(_ record: ResidentSelectionFixture) { record.constructions += 1 }
+}
+
+private struct ResidentDeckFixture: View {
+    @ObservedObject var selection: ResidentSelectionFixture
+    @StateObject private var lifetime: ResidentLifetimeFixture
+    init(selection: ResidentSelectionFixture) {
+        self.selection = selection
+        _lifetime = StateObject(wrappedValue: ResidentLifetimeFixture(selection))
+    }
+    var body: some View {
+        NavigationStack {
+            Text("Resident \(selection.tab.rawValue)")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.orange)
+                .navigationTitle("Resident fixture")
+        }
+        .onAppear { selection.appearances += 1 }
+        .task { selection.tasks += 1 }
+    }
+}
+
+private struct ResidentTabsFixture: View {
+    @ObservedObject var selection: ResidentSelectionFixture
+    let store: RootResidentPageHostStore
+    var body: some View {
+        TabView(selection: $selection.tab) {
+            ForEach(RootTab.allCases, id: \.self) { tab in
+                Tab("Page \(tab.rawValue)", systemImage: "circle", value: tab) {
+                    RootResidentHostLocator(store: store, content: AnyView(ResidentDeckFixture(selection: selection)))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .tabViewStyle(.sidebarAdaptable)
+        .onChange(of: selection.tab) { _, _ in store.selectionDidChange() }
+    }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testResidentHostReusesPagesAcrossNativeSelectionsAndResize() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKey = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        let selection = ResidentSelectionFixture(), store = RootResidentPageHostStore()
+        let root = UIHostingController(rootView: ResidentTabsFixture(selection: selection, store: store))
+        window.rootViewController = root; window.makeKeyAndVisible()
+        defer { window.isHidden = true; previousKey?.makeKey() }
+        try await Task.sleep(for: .milliseconds(250))
+        let host = try XCTUnwrap(store.hostingController)
+        let mount = try XCTUnwrap(host.view.superview)
+        let owner = try XCTUnwrap(mount.superview)
+        let counts = (selection.constructions, selection.appearances, selection.tasks)
+        XCTAssertEqual(counts.0, 1)
+        func assertVisible(file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertTrue(store.hostingController === host, file: file, line: line)
+            XCTAssertTrue(host.view.window === window, file: file, line: line)
+            XCTAssertTrue(mount.superview === owner, file: file, line: line)
+            var ancestor: UIView? = host.view
+            while let view = ancestor {
+                XCTAssertFalse(view.isHidden, "Hidden ancestor: \(type(of: view))", file: file, line: line)
+                XCTAssertGreaterThan(view.alpha, 0.99, file: file, line: line)
+                ancestor = view.superview
+            }
+            XCTAssertGreaterThan(host.view.bounds.width, 100, file: file, line: line)
+            XCTAssertGreaterThan(host.view.bounds.height, 100, file: file, line: line)
+            let point = host.view.convert(CGPoint(x: host.view.bounds.midX, y: host.view.bounds.midY), to: window)
+            XCTAssertTrue(window.hitTest(point, with: nil)?.isDescendant(of: host.view) == true,
+                          "Resident content must remain visible and interactive above placeholders", file: file, line: line)
+        }
+        assertVisible()
+        // First visits followed by cached tab revisits, including direction reversals.
+        for tab in ([RootTab.search, .favorites, .downloads, .account, .downloads, .favorites, .search, .explore]
+                    + [.search, .explore, .search, .favorites, .search, .explore]) {
+            var transaction = Transaction(); transaction.disablesAnimations = true
+            withTransaction(transaction) { selection.tab = tab }
+            try await Task.sleep(for: .milliseconds(80))
+            assertVisible()
+        }
+        root.view.frame.size = CGSize(width: root.view.bounds.width * 0.75, height: root.view.bounds.height * 0.8)
+        root.view.setNeedsLayout(); root.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        assertVisible()
+        XCTAssertEqual(selection.constructions, counts.0, "Tab selection must not recreate resident state")
+        XCTAssertEqual(selection.appearances, counts.1, "Tab selection must not detach resident pages")
+        XCTAssertEqual(selection.tasks, counts.2, "Tab selection must not restart resident tasks")
+        print("RESIDENT_HOST selections=14 identity=preserved lifecycle=\(counts) bounds=\(host.view.bounds)")
+    }
+}
+
+@MainActor
+private final class ReaderMovingScrollFixture: UIScrollView {
+    var fingerMoving = false
+    var coasting = false
+    override var isDragging: Bool { fingerMoving }
+    override var isDecelerating: Bool { coasting }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testReaderSettledSizeAnchorDoesNotPullBackLaterScrolling() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        let host = UIViewController(); window.rootViewController = host; window.isHidden = false
+        let scroll = UIScrollView(frame: window.bounds); host.view.addSubview(scroll)
+        scroll.contentSize = CGSize(width: 400, height: 20000)
+        scroll.contentOffset.y = 2300
+        let zoom = ReaderContinuousZoomController()
+        defer { zoom.detach(); window.isHidden = true }
+        let row = ReaderPageGeometryMarker.Marker(frame: CGRect(x: 0, y: 2100, width: 400, height: 800))
+        row.index = 3; row.zoom = zoom; scroll.addSubview(row)
+        zoom.register(row); zoom.viewportChanged(to: scroll.bounds.size); zoom.didScroll()
+        zoom.pageSizeWillChange(index: 2)
+        row.frame.origin.y += 100
+        zoom.geometryChanged()
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 2400, accuracy: 0.5)
+        for offset: CGFloat in [2500, 2580, 2660] {
+            scroll.contentOffset.y = offset
+            zoom.didScroll()
+            zoom.geometryChanged()
+            try await Task.sleep(for: .milliseconds(30))
+            XCTAssertEqual(scroll.contentOffset.y, offset, accuracy: 0.5,
+                           "Late layout must not restore a previous reading position")
+        }
+    }
+
+    @MainActor
+    func testReaderImageArrivalCannotRearmAnchorDuringDragOrDeceleration() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        let host = UIViewController(); window.rootViewController = host; window.isHidden = false
+        let scroll = ReaderMovingScrollFixture(frame: window.bounds); host.view.addSubview(scroll)
+        scroll.contentSize = CGSize(width: 400, height: 20000)
+        scroll.contentOffset.y = 2300
+        let zoom = ReaderContinuousZoomController()
+        defer { zoom.detach(); window.isHidden = true }
+        let row = ReaderPageGeometryMarker.Marker(frame: CGRect(x: 0, y: 2100, width: 400, height: 800))
+        row.index = 3; row.zoom = zoom; scroll.addSubview(row)
+        zoom.register(row); zoom.viewportChanged(to: scroll.bounds.size); zoom.didScroll()
+        zoom.beginPan()
+        for coasting in [false, true] {
+            scroll.fingerMoving = !coasting; scroll.coasting = coasting
+            zoom.pageSizeWillChange(index: 2)
+            let next = scroll.contentOffset.y + 150
+            scroll.contentOffset.y = next
+            zoom.didScroll()
+            zoom.geometryChanged()
+            try await Task.sleep(for: .milliseconds(40))
+            XCTAssertEqual(scroll.contentOffset.y, next, accuracy: 0.5)
+            XCTAssertFalse(zoom.isAdjustingFocus)
+        }
+    }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testResidentFavoritesReceiveCommittedFolderTotalsWithoutReloadOrRequests() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OfflineLibraryDatabase(databaseURL: directory.appendingPathComponent("fixture.db"))
+        let notifications = NotificationCenter()
+        let cache = FavoriteCacheStore(database: database, notifications: notifications)
+        let model = FavoritesViewModel(cache: cache, notifications: notifications)
+        model.activateAccount("fixture-a")
+        let folders = [FavoriteFolder(id: "0", name: "All", count: 5),
+                       FavoriteFolder(id: "9", name: "Synthetic folder")]
+        try await cache.replaceFolders(accountID: "fixture-a", folders: folders)
+        try await eventually { model.folders.count == 2 }
+        let page = FavoritePage(json: ["total": 2, "list": [["id": "1", "name": "One"], ["id": "2", "name": "Two"]]])
+        try await cache.cache(accountID: "fixture-a", folderID: "9", sortOrder: .added,
+                              page: 1, pageSize: 2, result: page, syncToken: "sync")
+        try await cache.finish(accountID: "fixture-a", folderID: "9", sortOrder: .added,
+                               syncToken: "sync", total: 2)
+        try await eventually { model.folders.first(where: { $0.id == "9" })?.count == 2 }
+        // Folder-list metadata may omit counts; a known content total survives it.
+        try await cache.replaceFolders(accountID: "fixture-a", folders: folders)
+        let persisted = try database.cachedFavoriteFolders(accountID: "fixture-a")
+        XCTAssertEqual(persisted.first(where: { $0.id == "9" })?.count, 2)
+        // A real empty-folder content response must still update to zero.
+        try await cache.cache(accountID: "fixture-a", folderID: "9", sortOrder: .added,
+                              page: 1, pageSize: 2, result: FavoritePage(json: ["total": 0, "list": []]), syncToken: "empty")
+        try await cache.finish(accountID: "fixture-a", folderID: "9", sortOrder: .added,
+                               syncToken: "empty", total: 0)
+        try await eventually { model.folders.first(where: { $0.id == "9" })?.count == 0 }
+        model.activateAccount("fixture-b")
+        try await cache.replaceFolders(accountID: "fixture-b", folders: [FavoriteFolder(id: "0", name: "Other", count: 7)])
+        try await cache.replaceFolders(accountID: "fixture-a", folders: folders)
+        try await eventually { model.folders.first?.count == 7 }
+        XCTAssertEqual(model.folders.map(\.id), ["0"])
+        model.activateAccount("")
+        try await cache.replaceFolders(accountID: "fixture-b", folders: folders)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(model.folders.isEmpty, "A late commit must not restore signed-out account data")
+    }
+
+    @MainActor
+    func testReaderQueuedPassiveCorrectionYieldsToNewOffsetBeforeScrollCallback() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        let host = UIViewController(); window.rootViewController = host; window.isHidden = false
+        let scroll = UIScrollView(frame: window.bounds); host.view.addSubview(scroll)
+        scroll.contentSize = CGSize(width: 400, height: 20000); scroll.contentOffset.y = 2300
+        let zoom = ReaderContinuousZoomController()
+        defer { zoom.detach(); window.isHidden = true }
+        let row = ReaderPageGeometryMarker.Marker(frame: CGRect(x: 0, y: 2100, width: 400, height: 800))
+        row.index = 3; row.zoom = zoom; scroll.addSubview(row)
+        zoom.register(row); zoom.viewportChanged(to: scroll.bounds.size); zoom.didScroll()
+        zoom.pageSizeWillChange(index: 2)
+        scroll.contentOffset.y = 2450 // native scroll before the delayed SwiftUI callback
+        zoom.geometryChanged()
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 2450, accuracy: 0.5)
+        zoom.scrollPhaseChanged(.interacting)
+        zoom.pageSizeWillChange(index: 2)
+        XCTAssertFalse(zoom.isAdjustingFocus)
+        zoom.scrollPhaseChanged(.decelerating)
+        zoom.pageSizeWillChange(index: 2)
+        XCTAssertFalse(zoom.isAdjustingFocus)
+        zoom.scrollPhaseChanged(.idle)
+        zoom.didScroll()
+        zoom.pageSizeWillChange(index: 4) // a lower row cannot move this visible anchor
+        XCTAssertFalse(zoom.isAdjustingFocus)
+    }
+}

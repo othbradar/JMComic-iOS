@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 private extension FavoriteComicSortOrder {
     var title: String {
@@ -16,8 +17,29 @@ private extension FavoriteComicSortOrder {
     }
 }
 
-private actor FavoriteCacheStore {
+struct FavoriteFoldersSnapshot {
+    let accountID: String
+    let folders: [FavoriteFolder]
+}
+
+actor FavoriteCacheStore {
     static let shared = FavoriteCacheStore()
+    static let foldersDidChange = Notification.Name("JMComic.favoriteFoldersDidChange")
+    private let suppliedDatabase: OfflineLibraryDatabase?
+    private let notifications: NotificationCenter
+
+    init(database: OfflineLibraryDatabase? = nil, notifications: NotificationCenter = .default) {
+        suppliedDatabase = database
+        self.notifications = notifications
+    }
+
+    private func publishFolders(accountID: String) throws {
+        // Read only the small folder metadata after the database commit. The
+        // resident sidebar must update even when its task/onAppear never reruns.
+        let snapshot = FavoriteFoldersSnapshot(accountID: accountID,
+                                               folders: try database.cachedFavoriteFolders(accountID: accountID))
+        notifications.post(name: Self.foldersDidChange, object: snapshot)
+    }
 
     private struct FirstPageEntry {
         let result: FavoritePage
@@ -31,7 +53,7 @@ private actor FavoriteCacheStore {
 
     private var database: OfflineLibraryDatabase {
         get throws {
-            guard let database = JMComicDatabase.shared else {
+            guard let database = suppliedDatabase ?? JMComicDatabase.shared else {
                 throw OfflineLibraryDatabaseError.invalidData("收藏数据库未初始化")
             }
             return database
@@ -44,6 +66,7 @@ private actor FavoriteCacheStore {
 
     func replaceFolders(accountID: String, folders: [FavoriteFolder]) throws {
         try database.replaceFavoriteFolders(accountID: accountID, folders: folders, at: .now)
+        try publishFolders(accountID: accountID)
     }
 
     func page(
@@ -81,6 +104,7 @@ private actor FavoriteCacheStore {
             syncToken: syncToken,
             at: .now
         )
+        try publishFolders(accountID: accountID)
     }
 
     func finish(
@@ -98,6 +122,7 @@ private actor FavoriteCacheStore {
             total: total,
             at: .now
         )
+        try publishFolders(accountID: accountID)
     }
 
     func lastSync(
@@ -151,6 +176,7 @@ private actor FavoriteCacheStore {
             comics: comics,
             at: .now
         )
+        try publishFolders(accountID: accountID)
     }
 
     func replaceLeadingPage(
@@ -168,6 +194,7 @@ private actor FavoriteCacheStore {
             remoteTotal: remoteTotal,
             at: .now
         )
+        try publishFolders(accountID: accountID)
     }
 
     func storeFirstPage(
@@ -219,24 +246,43 @@ private actor FavoriteCacheStore {
 }
 
 @MainActor
-private final class FavoritesViewModel: ObservableObject {
+final class FavoritesViewModel: ObservableObject {
     @Published var folders: [FavoriteFolder] = []
     @Published var isLoading = false
     @Published var error: String?
     private var activeAccountID = ""
     private var loadGeneration = UUID()
+    private let cache: FavoriteCacheStore
+    private var folderObservation: AnyCancellable?
+
+    init(cache: FavoriteCacheStore = .shared, notifications: NotificationCenter = .default) {
+        self.cache = cache
+        folderObservation = notifications.publisher(for: FavoriteCacheStore.foldersDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self, let snapshot = notification.object as? FavoriteFoldersSnapshot,
+                          !self.activeAccountID.isEmpty, snapshot.accountID == self.activeAccountID else { return }
+                    if self.folders != snapshot.folders { self.folders = snapshot.folders }
+                }
+            }
+    }
+
+    func activateAccount(_ accountID: String) {
+        guard activeAccountID != accountID else { return }
+        activeAccountID = accountID
+        loadGeneration = UUID()
+        folders = []
+        error = nil
+        isLoading = false
+    }
 
     func load(api: APIClient, sortOrder: FavoriteComicSortOrder) async {
         guard let accountID = api.profile?.id, !accountID.isEmpty else {
-            folders = []
-            activeAccountID = ""
+            activateAccount("")
             return
         }
-        if activeAccountID != accountID {
-            activeAccountID = accountID
-            folders = []
-            error = nil
-        }
+        activateAccount(accountID)
         let generation = UUID()
         loadGeneration = generation
         isLoading = true
@@ -245,7 +291,7 @@ private final class FavoritesViewModel: ObservableObject {
         }
 
         // 先用本地 SQLite 立即展示，网络只负责后台更新元数据。
-        if let cached = try? await FavoriteCacheStore.shared.folders(accountID: accountID),
+        if let cached = try? await cache.folders(accountID: accountID),
            !cached.isEmpty {
             guard activeAccountID == accountID, loadGeneration == generation else { return }
             folders = cached
@@ -256,14 +302,14 @@ private final class FavoritesViewModel: ObservableObject {
             // pay for an unused mr page before loading its own first page.
             let result = try await api.favorites(order: sortOrder.rawValue)
             guard activeAccountID == accountID, loadGeneration == generation else { return }
-            await FavoriteCacheStore.shared.storeFirstPage(
+            await cache.storeFirstPage(
                 result,
                 accountID: accountID,
                 folderID: "0",
                 sortOrder: sortOrder
             )
-            try await FavoriteCacheStore.shared.replaceFolders(accountID: accountID, folders: result.folders)
-            let updated = try await FavoriteCacheStore.shared.folders(accountID: accountID)
+            try await cache.replaceFolders(accountID: accountID, folders: result.folders)
+            let updated = try await cache.folders(accountID: accountID)
             guard activeAccountID == accountID, loadGeneration == generation else { return }
             folders = updated
             error = nil
@@ -362,7 +408,7 @@ struct FavoritesView: View {
                                 NavigationLink(value: folder.id) {
                                     FavoriteFolderRow(folder: folder) { deletingFolder = folder }
                                 }
-                                .badge(folder.count)
+                                .badge(Text(folder.count.formatted()))
                                 .listRowBackground(Color.clear)
                             }
                         }
@@ -529,6 +575,7 @@ struct FavoritesView: View {
                 // not resurrect it if this account later signs out again.
                 loggedOutNavigationPath.removeAll()
             } else {
+                model.activateAccount("")
                 selectedFolderID = nil
                 folderNavigationPath = NavigationPath()
             }

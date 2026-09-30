@@ -2940,90 +2940,108 @@ private struct RootResidentTransition: Equatable {
 /// below still owns iPhone's liquid-glass tab bar and iPad's adaptive top/sidebar
 /// chrome, but its lazily-created tab children are only zero-cost locators.
 ///
-/// The host is installed once above UITabBarController's persistent content
-/// transition view. Its layer remains above every placeholder tab child, so a
-/// system selection change can never expose a stale, blank or recycled page.
+/// The host belongs directly to the tab controller's root view, outside its
+/// replaceable selected-content wrappers. Native chrome remains above it.
 @MainActor
-private final class RootResidentPageHostStore: ObservableObject {
+final class RootResidentPageHostStore: ObservableObject {
     @Published private(set) var contentTopInset: CGFloat = 0
-    private var hostingController: UIHostingController<AnyView>?
-    private weak var contentContainer: UIView?
+    private(set) var hostingController: UIHostingController<AnyView>?
+    private weak var tabController: UITabBarController?
+    private var updateScheduled = false
+    private let mount = MountView()
 
     func install(from locator: UIView, content: AnyView) {
         guard locator.window != nil,
-              let tabBarController = Self.tabBarController(from: locator) else { return }
+              let controller = Self.tabBarController(from: locator) else { return }
+        tabController = controller
+        if hostingController == nil {
+            let host = UIHostingController(rootView: content)
+            host.view.backgroundColor = .clear
+            host.view.clipsToBounds = true
+            host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            hostingController = host
+            mount.backgroundColor = .clear
+            mount.clipsToBounds = true
+            mount.addSubview(host.view)
+            mount.geometryDidChange = { [weak self] in self?.scheduleUpdate() }
+        }
+        // Never force ancestor layout from a locator's layoutSubviews. UIKit
+        // may still be removing the outgoing selection in this render turn.
+        updateMount()
+        scheduleUpdate()
+    }
 
-        tabBarController.loadViewIfNeeded()
-        guard let selectedController = tabBarController.selectedViewController else { return }
-        selectedController.loadViewIfNeeded()
-        tabBarController.view.layoutIfNeeded()
+    func selectionDidChange() {
+        scheduleUpdate()
+        tabController?.transitionCoordinator?.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.scheduleUpdate()
+        }
+    }
 
-        guard let selectedView = selectedController.view,
-              let container = Self.persistentContentContainer(
-                for: selectedView,
-                in: tabBarController
-              ) else { return }
+    private func scheduleUpdate() {
+        guard !updateScheduled else { return }
+        updateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.updateScheduled = false
+            self.updateMount()
+        }
+    }
 
-        let host: UIHostingController<AnyView>
-        if let hostingController {
-            host = hostingController
-        } else {
-            let created = UIHostingController(rootView: content)
-            created.view.backgroundColor = .clear
-            created.view.clipsToBounds = true
-            created.view.translatesAutoresizingMaskIntoConstraints = true
-            hostingController = created
-            host = created
+    private func updateMount() {
+        guard let controller = tabController,
+              let root = controller.viewIfLoaded, root.window != nil,
+              let selectedView = controller.selectedViewController?.viewIfLoaded,
+              selectedView.isDescendant(of: root),
+              let hostView = hostingController?.view else { return }
+
+        var contentBranch = selectedView
+        while let parent = contentBranch.superview, parent !== root {
+            contentBranch = parent
+        }
+        guard contentBranch !== root, contentBranch !== mount,
+              contentBranch.superview === root else { return }
+
+        // A zPosition inside a retired/hidden wrapper cannot keep its children
+        // visible. Keep this app-owned sibling mounted across native selections.
+        // Use normal sibling order so the live tab/sidebar chrome stays above it.
+        if mount.superview !== root {
+            root.insertSubview(mount, aboveSubview: contentBranch)
+        } else if let contentIndex = root.subviews.firstIndex(of: contentBranch),
+                  let mountIndex = root.subviews.firstIndex(of: mount),
+                  mountIndex < contentIndex {
+            root.insertSubview(mount, aboveSubview: contentBranch)
         }
 
-        let hostView = host.view!
-        if hostView.superview !== container {
-            hostView.removeFromSuperview()
-            container.addSubview(hostView)
-            contentContainer = container
+        let frame = root.convert(contentBranch.bounds, from: contentBranch)
+        guard frame.width > 0, frame.height > 0, !frame.isInfinite, !frame.isNull else { return }
+        UIView.performWithoutAnimation {
+            if mount.frame != frame { mount.frame = frame }
+            if hostView.frame != mount.bounds { hostView.frame = mount.bounds }
         }
-
-        // UIKit may insert a newly-selected placeholder above existing
-        // siblings. A stable layer level inside the content-only transition
-        // container keeps the resident pages visible without covering the
-        // system tab/sidebar chrome, which lives outside this container.
-        hostView.layer.zPosition = 100
-        hostView.frame = container.bounds
-        hostView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        hostView.isHidden = false
-        hostView.setNeedsLayout()
-
+        // Keep the proven view-only hosting (no additional tab child/controller)
+        // so NavigationStack's interactive-pop ownership remains unchanged.
         let topInset = selectedView.safeAreaInsets.top
         if abs(topInset - contentTopInset) > 0.5 {
-            // The resident host deliberately remains a plain overlay view:
-            // making it another UITabBarController child broke NavigationStack
-            // interactive-pop and left the root gesture lifecycle stale after
-            // returning from a detail page. Publish only the reference page's
-            // top geometry; SwiftUI consumes it without changing controller
-            // containment or the proven resident-page transition mechanism.
-            DispatchQueue.main.async { [weak self] in
-                guard let self,
+            DispatchQueue.main.async { [weak self, weak selectedView] in
+                guard let self, let selectedView,
+                      self.tabController?.selectedViewController?.viewIfLoaded === selectedView,
                       abs(topInset - self.contentTopInset) > 0.5 else { return }
                 self.contentTopInset = topInset
             }
         }
     }
 
-    private static func persistentContentContainer(
-        for selectedView: UIView,
-        in tabBarController: UITabBarController
-    ) -> UIView? {
-        var candidate = selectedView.superview
-        var highestBelowTabRoot: UIView?
-        while let current = candidate, current !== tabBarController.view {
-            highestBelowTabRoot = current
-            candidate = current.superview
+    private final class MountView: UIView {
+        var geometryDidChange: (() -> Void)?
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            geometryDidChange?()
         }
-
-        // UITabBarController's direct content transition view persists while
-        // its selected child changes. Installing here avoids moving the real
-        // SwiftUI hierarchy between lazy tab controllers.
-        return highestBelowTabRoot ?? selectedView.superview
+        override func safeAreaInsetsDidChange() {
+            super.safeAreaInsetsDidChange()
+            geometryDidChange?()
+        }
     }
 
     private static func tabBarController(from view: UIView) -> UITabBarController? {
@@ -3041,7 +3059,7 @@ private final class RootResidentPageHostStore: ObservableObject {
 }
 
 @MainActor
-private struct RootResidentHostLocator: UIViewRepresentable {
+struct RootResidentHostLocator: UIViewRepresentable {
     let store: RootResidentPageHostStore
     let content: AnyView
 
@@ -3645,6 +3663,7 @@ struct RootView: View {
         .tint(.accentColor)
         .background(appearance.background(for: colorScheme).ignoresSafeArea())
         .rootTabBarChromeFallback(appearance.background(for: colorScheme))
+        .onChange(of: state.selectedTab) { _, _ in pageHost.selectionDidChange() }
     }
 
     private var residentContent: AnyView {
