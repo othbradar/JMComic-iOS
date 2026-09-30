@@ -191,6 +191,11 @@ struct ReaderView: View {
     @Environment(\.readerIsPresented) private var readerIsPresented
     let comic: ComicSummary
     let chapter: Chapter
+    @AppStorage(PageImagePreferences.prefetchCountKey) private var prefetchPages = PageImagePreferences.defaultPrefetchCount
+    @AppStorage(PageImagePreferences.repairChromaKey) private var repairChroma = false
+    @State private var prefetchOwner = UUID()
+    @State private var chapterLoadGeneration = UUID()
+    @State private var loadedChapterID: String?
     @State private var detail: ChapterDetail?
     @State private var localURLs: [URL] = []
     @State private var mode: ReaderMode = .vertical
@@ -218,11 +223,11 @@ struct ReaderView: View {
             Color.black.ignoresSafeArea()
             if !localURLs.isEmpty {
                 readerContent { index in
-                    LocalPageView(url: localURLs[index])
+                    LocalPageView(url: localURLs[index], isCurrentPage: index == currentPage, isRequested: abs(index - currentPage) <= PageImagePreferences.boundedPrefetchCount(prefetchPages))
                 }
             } else if let detail {
                 readerContent { index in
-                    OnlinePageView(chapter: detail, index: index)
+                    OnlinePageView(chapter: detail, index: index, isCurrentPage: index == currentPage, isRequested: abs(index - currentPage) <= PageImagePreferences.boundedPrefetchCount(prefetchPages))
                 }
             } else if let error {
                 ContentUnavailableView("无法打开章节", systemImage: "photo.stack", description: Text(error))
@@ -256,20 +261,35 @@ struct ReaderView: View {
         .preferredColorScheme(.dark)
         .onAppear { readerIsPresented.wrappedValue = true }
         .onDisappear {
+            chapterLoadGeneration = UUID()
+            api.cancelReadingPrefetch(owner: prefetchOwner)
+            LocalPageImages.shared.cancelPrefetch(owner: prefetchOwner)
             pageIsZoomed = false
             progressStore.flush()
             readerIsPresented.wrappedValue = false
         }
         .task(id: chapter.id) { await load() }
+        .task(id: "\(chapter.id)|\(loadedChapterID ?? "")|\(pageCount)|\(currentPage)|\(prefetchPages)|\(repairChroma)") {
+            guard !Task.isCancelled else { return }
+            guard loadedChapterID == chapter.id else {
+                api.cancelReadingPrefetch(owner: prefetchOwner)
+                LocalPageImages.shared.cancelPrefetch(owner: prefetchOwner)
+                return
+            }
+            if let detail, localURLs.isEmpty {
+                api.prefetchDecodedPages(chapter: detail, around: currentPage, owner: prefetchOwner,
+                    count: prefetchPages, processing: repairChroma ? .repairChroma : .faithful)
+            } else if !localURLs.isEmpty {
+                LocalPageImages.shared.updatePrefetch(owner: prefetchOwner, urls: localURLs,
+                    around: currentPage, count: prefetchPages)
+            }
+        }
         .onChange(of: mode) { _, _ in
             pageIsZoomed = false
         }
         .onChange(of: currentPage) { _, value in
             progressStore.update(comicID: comic.id, chapterID: chapter.id, pageIndex: value)
             history.record(comic: comic, chapter: chapter, pageIndex: value)
-            if let detail {
-                api.prefetchDecodedPages(chapter: detail, after: value)
-            }
         }
     }
 
@@ -303,22 +323,32 @@ struct ReaderView: View {
     }
 
     private func load() async {
-        // localPageURLs already validates completeness and file existence.
-        localURLs = downloads.localPageURLs(comicID: comic.id, chapterID: chapter.id)
-        if !localURLs.isEmpty {
+        let generation = UUID()
+        chapterLoadGeneration = generation
+        api.cancelReadingPrefetch(owner: prefetchOwner)
+        LocalPageImages.shared.cancelPrefetch(owner: prefetchOwner)
+        if loadedChapterID != chapter.id { localURLs = []; detail = nil; loadedChapterID = nil }
+        // File checks and network metadata may outlive a dismissed reader or
+        // chapter change; publish only into the still-current generation.
+        let files = await downloads.localPageURLs(comicID: comic.id, chapterID: chapter.id)
+        guard !Task.isCancelled, chapterLoadGeneration == generation else { return }
+        localURLs = files
+        if !files.isEmpty {
+            loadedChapterID = chapter.id
             restorePage()
             history.record(comic: comic, chapter: chapter, pageIndex: currentPage)
             return
         }
         do {
-            detail = try await api.chapter(id: chapter.id)
+            let result = try await api.chapter(id: chapter.id)
+            guard !Task.isCancelled, chapterLoadGeneration == generation else { return }
+            detail = result
+            loadedChapterID = chapter.id
             restorePage()
             history.record(comic: comic, chapter: chapter, pageIndex: currentPage)
-            if let detail {
-                api.prefetchDecodedPages(chapter: detail, after: max(-1, currentPage - 1))
-            }
         } catch {
-            guard !APIClient.isCancellation(error), !Task.isCancelled else { return }
+            guard !APIClient.isCancellation(error), !Task.isCancelled,
+                  chapterLoadGeneration == generation else { return }
             self.error = error.localizedDescription
         }
     }
@@ -469,7 +499,10 @@ struct ReaderContinuousRow<Content: View>: View {
             .frame(width: baseWidth)
             .fixedSize(horizontal: false, vertical: true)
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                if height > 0, baseHeight != height { baseHeight = height }
+                if height > 0, baseHeight != height {
+                    zoom.pageSizeWillChange(index: index)
+                    baseHeight = height
+                }
             }
             .scaleEffect(scale, anchor: .topLeading)
             .frame(width: baseWidth * scale, height: baseHeight.map { $0 * scale }, alignment: .topLeading)
@@ -629,6 +662,15 @@ final class ReaderContinuousZoomController: NSObject, ObservableObject {
         }
     }
 
+    func pageSizeWillChange(index: Int) {
+        guard !isAdjustingFocus, let restingAnchor,
+              rows[restingAnchor.index] != nil else { return }
+        anchor = restingAnchor
+        isAdjustingFocus = true
+        finishAfterLayout = true
+        geometryChanged()
+    }
+
     func geometryChanged() {
         guard !adjustmentScheduled else { return }
         adjustmentScheduled = true
@@ -746,44 +788,56 @@ private struct OnlinePageView: View {
     @AppStorage(PageImagePreferences.repairChromaKey) private var repairChroma = false
     let chapter: ChapterDetail
     let index: Int
+    let isCurrentPage: Bool
+    let isRequested: Bool
+    @State private var onScreen = false
+    @State private var consumer = UUID()
+    @State private var generation = UUID()
     @State private var image: UIImage?
+    @State private var dimensions: CGSize?
     @State private var error: String?
     @State private var retryID = 0
+    private var visible: Bool { isCurrentPage || onScreen }
+    private var shouldLoad: Bool { isRequested || onScreen }
+    private var processing: PageImageProcessing { repairChroma ? .repairChroma : .faithful }
 
     var body: some View {
         Group {
-            if let image {
-                ReaderPageImage(image: image)
-            } else if let error {
-                Button {
-                    self.error = nil
-                    retryID &+= 1
-                } label: {
-                    VStack(spacing: 8) {
-                        Image(systemName: "arrow.clockwise")
-                        Text("加载失败，点击重试").font(.caption)
-                        Text(error).font(.caption2).lineLimit(2)
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: 360)
+            if let image { ReaderPageImage(image: image) }
+            else {
+                ReaderImagePlaceholder(dimensions: dimensions) {
+                    if let error {
+                        Button { self.error = nil; retryID &+= 1 } label: {
+                            VStack(spacing: 8) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("加载失败，点击重试").font(.caption)
+                                Text(error).font(.caption2).lineLimit(2)
+                            }.foregroundStyle(.white)
+                        }.buttonStyle(.plain)
+                    } else { ProgressView().tint(.white) }
                 }
-                .buttonStyle(.plain)
-            } else {
-                ProgressView().tint(.white).frame(minHeight: 360)
             }
         }
         .frame(maxWidth: .infinity)
-        .task(id: "\(chapter.id)|\(index)|\(retryID)|\(repairChroma)") {
-            let processing: PageImageProcessing = repairChroma ? .repairChroma : .faithful
+        .onScrollVisibilityChange(threshold: 0.01) { onScreen = $0 }
+        .onChange(of: visible) { _, value in
+            api.setDecodedPageVisible(value, chapter: chapter, index: index, processing: processing, consumer: consumer)
+        }
+        .onDisappear { image = nil }
+        .task(id: "\(chapter.id)|\(index)|\(retryID)|\(repairChroma)|\(shouldLoad)") {
+            let stamp = UUID(); generation = stamp
+            let requestConsumer = UUID(); consumer = requestConsumer
+            guard shouldLoad else { image = nil; return }
+            let strategy = processing
             do {
-                let value = try await api.decodedPageImage(chapter: chapter, index: index, processing: processing)
-                guard !Task.isCancelled else { return }
-                image = value
-                error = nil
-                api.prefetchDecodedPages(chapter: chapter, after: index, processing: processing)
+                let result = try await api.decodedPageImage(chapter: chapter, index: index,
+                    processing: strategy, consumer: requestConsumer, visible: visible, metadata: { size in
+                        if generation == stamp { dimensions = size }
+                    })
+                guard !Task.isCancelled, generation == stamp else { return }
+                image = result; error = nil
             } catch {
-                // LazyVStack/TabView 回收页面时的取消是正常生命周期，不应显示 cancelled。
-                guard !APIClient.isCancellation(error), !Task.isCancelled else { return }
+                guard !APIClient.isCancellation(error), !Task.isCancelled, generation == stamp else { return }
                 self.error = error.localizedDescription
             }
         }
@@ -791,46 +845,73 @@ private struct OnlinePageView: View {
 }
 
 private struct LocalPageView: View {
+    @Environment(\.scenePhase) private var scenePhase
     let url: URL
+    let isCurrentPage: Bool
+    let isRequested: Bool
+    @State private var onScreen = false
+    @State private var consumer = UUID()
+    @State private var generation = UUID()
     @State private var image: UIImage?
-    @State private var failed = false
+    @State private var dimensions: CGSize?
+    @State private var error: String?
     @State private var retryID = 0
+    private var visible: Bool { isCurrentPage || onScreen }
+    private var shouldLoad: Bool { isRequested || onScreen }
 
     var body: some View {
         Group {
-            if let image {
-                ReaderPageImage(image: image)
-            } else if failed {
-                Button {
-                    failed = false
-                    retryID &+= 1
-                } label: {
-                    VStack(spacing: 8) {
-                        Image(systemName: "arrow.clockwise")
-                        Text("文件读取失败，点击重试").font(.caption)
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: 360)
+            if let image { ReaderPageImage(image: image) }
+            else {
+                ReaderImagePlaceholder(dimensions: dimensions) {
+                    if let error {
+                        Button { self.error = nil; retryID &+= 1 } label: {
+                            VStack(spacing: 8) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("文件读取失败，点击重试").font(.caption)
+                                Text(error).font(.caption2).lineLimit(2)
+                            }.foregroundStyle(.white)
+                        }.buttonStyle(.plain)
+                    } else { ProgressView().tint(.white) }
                 }
-                .buttonStyle(.plain)
-            } else {
-                ProgressView().tint(.white).frame(minHeight: 360)
             }
         }
         .frame(maxWidth: .infinity)
-        .task(id: "\(url.path)#\(retryID)") {
+        .onScrollVisibilityChange(threshold: 0.01) { onScreen = $0 }
+        .onChange(of: visible) { _, value in LocalPageImages.shared.setVisible(value, consumer: consumer) }
+        .onChange(of: scenePhase) { _, value in if value == .active { retryID &+= 1 } }
+        .onReceive(NotificationCenter.default.publisher(for: LocalPageImages.filesChanged)) { notice in
+            guard let urls = notice.userInfo?["urls"] as? [URL], urls.contains(url) else { return }
+            image = nil; dimensions = nil; retryID &+= 1
+        }
+        .onDisappear { image = nil }
+        .task(id: "\(url.path)|\(retryID)|\(shouldLoad)") {
+            let stamp = UUID(); generation = stamp
+            let requestConsumer = UUID(); consumer = requestConsumer
+            guard shouldLoad else { image = nil; return }
             do {
-                let data = try await Task.detached(priority: .userInitiated) { try Data(contentsOf: url) }.value
-                let value = try await Task.detached(priority: .userInitiated) {
-                    try ImageScrambler.rasterImage(from: data)
-                }.value
-                guard !Task.isCancelled else { return }
-                image = value
-                failed = false
+                let result = try await LocalPageImages.shared.image(url: url, consumer: requestConsumer, visible: visible) { size in
+                    if generation == stamp { dimensions = size }
+                }
+                guard !Task.isCancelled, generation == stamp else { return }
+                image = result; error = nil
             } catch {
-                guard !APIClient.isCancellation(error), !Task.isCancelled else { return }
-                failed = true
+                guard !APIClient.isCancellation(error), !Task.isCancelled, generation == stamp else { return }
+                self.error = error.localizedDescription
             }
+        }
+    }
+}
+
+private struct ReaderImagePlaceholder<Content: View>: View {
+    let dimensions: CGSize?
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        if let dimensions, dimensions.height > 0 {
+            Color.clear.aspectRatio(dimensions.width / dimensions.height, contentMode: .fit)
+                .overlay { content() }
+        } else {
+            Color.clear.frame(minHeight: 360).overlay { content() }
         }
     }
 }

@@ -78,11 +78,11 @@ final class APIClient: ObservableObject {
     private var dailySignTaskAuthenticationGeneration: Int?
     private var restoredSessionCookies: [HTTPCookie] = []
     private var preferredImageDomain: String?
-    private let imageRequestGate = AsyncPermitPool(limit: 4)
+    private let imageRequestGate = AsyncPermitPool(limit: 4, reservedVisibleSlots: 1)
     private let remoteImageCache = NSCache<NSString, UIImage>()
-    private let decodedPageCache = NSCache<NSString, UIImage>()
+    private let readingImages = ReadingImageLoader()
+    private let readingPrefetch = ReadingPrefetchWindow()
     private var remoteImageLoads: [String: SharedImageLoad] = [:]
-    private var decodedPageLoads: [String: SharedImageLoad] = [:]
 
     var isLoggedIn: Bool { profile != nil }
     var needsCredentialLogin: Bool { isLoggedIn && !hasSavedCredentials }
@@ -106,8 +106,6 @@ final class APIClient: ObservableObject {
         hasCompletedBootstrap = !requiresBootstrap
         remoteImageCache.countLimit = 180
         remoteImageCache.totalCostLimit = 96 * 1_024 * 1_024
-        decodedPageCache.countLimit = 28
-        decodedPageCache.totalCostLimit = 224 * 1_024 * 1_024
         restoreSession()
         hasSavedCredentials = savedCredentials() != nil
     }
@@ -993,17 +991,21 @@ final class APIClient: ObservableObject {
     private func prioritizedImageData(
         path: String,
         preferredDomain: String?,
-        priority: TaskPriority
+        priority: TaskPriority,
+        urgency: PageLoadUrgency? = nil
     ) async throws -> Data {
         await bootstrap()
         try Task.checkCancellation()
+        let gate = imageRequestGate
+        urgency?.observePriority { Task { await gate.reprioritize() } }
         try await imageRequestGate.acquire(
             priority: priority,
-            limit: DownloadConcurrencyPreferences.cachedImageRequests()
+            limit: DownloadConcurrencyPreferences.cachedImageRequests(),
+            urgency: urgency
         )
         do {
             try Task.checkCancellation()
-            let data = try await imageDataUsingAcquiredSlot(path: path, preferredDomain: preferredDomain)
+            let data = try await imageDataUsingAcquiredSlot(path: path, preferredDomain: preferredDomain, urgency: urgency)
             await imageRequestGate.release()
             return data
         } catch {
@@ -1013,11 +1015,11 @@ final class APIClient: ObservableObject {
     }
 
     /// 调用前必须已获取 imageRequestGate；封面后缀回退在同一 slot 内完成，避免递归死锁。
-    private func imageDataUsingAcquiredSlot(path: String, preferredDomain: String?) async throws -> Data {
+    private func imageDataUsingAcquiredSlot(path: String, preferredDomain: String?, urgency: PageLoadUrgency? = nil) async throws -> Data {
         try Task.checkCancellation()
         if path.hasPrefix("http"), let url = URL(string: path) {
             do {
-                return try await fetchImage(url: url)
+                return try await fetchImage(url: url, urgency: urgency)
             } catch {
                 if Self.isCancellation(error) || Task.isCancelled { throw CancellationError() }
                 throw error
@@ -1033,7 +1035,7 @@ final class APIClient: ObservableObject {
             domains.insert(preferredImageDomain, at: 0)
         }
 
-        if let result = await firstImageData(path: path, domains: domains) {
+        if let result = await firstImageData(path: path, domains: domains, urgency: urgency) {
             recordSuccessfulImageDomain(result.domain)
             return result.data
         }
@@ -1041,7 +1043,8 @@ final class APIClient: ObservableObject {
         if let fallbackPath = JMServiceProtocol.MediaPath.fallbackAlbumCoverPath(for: path) {
             return try await imageDataUsingAcquiredSlot(
                 path: fallbackPath,
-                preferredDomain: preferredDomain
+                preferredDomain: preferredDomain,
+                urgency: urgency
             )
         }
         throw APIError.noAvailableDomain
@@ -1065,103 +1068,69 @@ final class APIClient: ObservableObject {
         return try await task.value
     }
 
-    /// 阅读页加载：解扰与像素解码在后台执行，并跨 SwiftUI 页面生命周期合并请求。
+    /// One shared generation per page/processing policy, with independent row
+    /// and prefetch consumers. Promotion doesn't replace an existing request.
     func decodedPageImage(
-        chapter: ChapterDetail,
-        index: Int,
-        processing: PageImageProcessing = PageImagePreferences.processing()
+        chapter: ChapterDetail, index: Int,
+        processing: PageImageProcessing = PageImagePreferences.processing(),
+        consumer: UUID = UUID(), visible: Bool = true, prefetchOnly: Bool = false,
+        metadata: @escaping ReadingImageLoader.Metadata = { _ in }
     ) async throws -> UIImage {
         guard chapter.images.indices.contains(index) else { throw APIError.invalidResponse }
-        try Task.checkCancellation()
         let filename = chapter.images[index]
-        let cacheKey = Self.decodedPageCacheKey(chapter: chapter, filename: filename, processing: processing)
-        if let cached = decodedPageCache.object(forKey: cacheKey as NSString) { return cached }
-        if let load = decodedPageLoads[cacheKey] {
-            return try await load.task.value
-        }
+        let key = Self.decodedPageCacheKey(chapter: chapter, filename: filename, processing: processing)
+        return try await readingImages.image(key: key, consumer: consumer, visible: visible, prefetchOnly: prefetchOnly, metadata: metadata,
+            source: { [weak self] urgency, _ in
+                guard let self else { throw CancellationError() }
+                return try await self.performDecodedPageLoad(chapter: chapter, index: index, urgency: urgency)
+            }, decode: { data in
+                try ImageScrambler.decodeImage(data, scrambleID: chapter.scrambleID,
+                                              photoID: chapter.id, filename: filename, processing: processing)
+            })
+    }
 
-        let loadID = UUID()
-        let task = Task { @MainActor [weak self] () throws -> UIImage in
-            guard let self else { throw CancellationError() }
-            return try await self.performDecodedPageLoad(
-                chapter: chapter,
-                index: index,
-                cacheKey: cacheKey,
-                processing: processing,
-                loadID: loadID
-            )
-        }
-        decodedPageLoads[cacheKey] = SharedImageLoad(id: loadID, task: task)
-        return try await task.value
+    func setDecodedPageVisible(_ visible: Bool, chapter: ChapterDetail, index: Int,
+                               processing: PageImageProcessing, consumer: UUID) {
+        guard chapter.images.indices.contains(index) else { return }
+        readingImages.setVisible(visible, key: Self.decodedPageCacheKey(
+            chapter: chapter, filename: chapter.images[index], processing: processing
+        ), consumer: consumer)
     }
 
     nonisolated static func decodedPageCacheKey(
-        chapter: ChapterDetail,
-        filename: String,
-        processing: PageImageProcessing
+        chapter: ChapterDetail, filename: String, processing: PageImageProcessing
     ) -> String {
         "\(processing.cacheIdentifier)|\(chapter.id)|\(chapter.scrambleID)|\(filename)"
     }
 
-    func prefetchDecodedPages(
-        chapter: ChapterDetail,
-        after index: Int,
-        count: Int = 2,
-        processing: PageImageProcessing = PageImagePreferences.processing()
-    ) {
-        guard count > 0 else { return }
-        let upperBound = min(chapter.images.count, index + count + 1)
-        guard index + 1 < upperBound else { return }
-        for candidate in (index + 1)..<upperBound {
-            let filename = chapter.images[candidate]
-            let cacheKey = Self.decodedPageCacheKey(chapter: chapter, filename: filename, processing: processing)
-            guard decodedPageCache.object(forKey: cacheKey as NSString) == nil,
-                  decodedPageLoads[cacheKey] == nil else { continue }
-            Task { @MainActor [weak self] in
-                _ = try? await self?.decodedPageImage(chapter: chapter, index: candidate, processing: processing)
-            }
+    func prefetchDecodedPages(chapter: ChapterDetail, around index: Int, owner: UUID,
+                              count: Int = PageImagePreferences.prefetchCount(),
+                              processing: PageImageProcessing = PageImagePreferences.processing()) {
+        readingPrefetch.update(owner: owner, prefix: "\(processing.cacheIdentifier)|\(chapter.id)|\(chapter.scrambleID)",
+            indices: PageImagePreferences.prefetchIndices(around: index, total: chapter.images.count, count: count)
+        ) { [weak self] candidate in
+            _ = try? await self?.decodedPageImage(chapter: chapter, index: candidate, processing: processing, visible: false, prefetchOnly: true)
         }
     }
+    func cancelReadingPrefetch(owner: UUID) { readingPrefetch.cancel(owner: owner) }
 
     private func performRemoteImageLoad(path: String, loadID: UUID) async throws -> UIImage {
         defer {
             if remoteImageLoads[path]?.id == loadID { remoteImageLoads[path] = nil }
         }
         let data = try await imageData(path: path)
-        let image = try await Task.detached(priority: .utility) {
-            try ImageScrambler.rasterImage(from: data)
-        }.value
+        let image = try await ReadingImageMemory.shared.decode(
+            data: data, urgency: PageLoadUrgency(visible: false), bytesPerPixel: 8
+        ) { try ImageScrambler.rasterImage(from: data) }
         remoteImageCache.setObject(image, forKey: path as NSString, cost: Self.memoryCost(of: image))
         return image
     }
 
-    private func performDecodedPageLoad(
-        chapter: ChapterDetail,
-        index: Int,
-        cacheKey: String,
-        processing: PageImageProcessing,
-        loadID: UUID
-    ) async throws -> UIImage {
-        defer {
-            if decodedPageLoads[cacheKey]?.id == loadID { decodedPageLoads[cacheKey] = nil }
-        }
-        let filename = chapter.images[index]
-        let data = try await prioritizedImageData(
-            path: chapter.pagePath(at: index),
-            preferredDomain: nil,
-            priority: .userInitiated
-        )
-        let image = try await Task.detached(priority: .userInitiated) {
-            try ImageScrambler.decodeImage(
-                data,
-                scrambleID: chapter.scrambleID,
-                photoID: chapter.id,
-                filename: filename,
-                processing: processing
-            )
-        }.value
-        decodedPageCache.setObject(image, forKey: cacheKey as NSString, cost: Self.memoryCost(of: image))
-        return image
+    private func performDecodedPageLoad(chapter: ChapterDetail, index: Int, urgency: PageLoadUrgency) async throws -> Data {
+        // The network slot ends before the page loader waits for pixel memory
+        // or starts background decoding. Staging and pixel permits are separate.
+        try await prioritizedImageData(path: chapter.pagePath(at: index), preferredDomain: nil,
+                                       priority: urgency.priority, urgency: urgency)
     }
 
     func decodedPageData(chapter: ChapterDetail, index: Int) async throws -> Data {
@@ -1327,7 +1296,7 @@ final class APIClient: ObservableObject {
         throw explicitAuthenticationError ?? finalError
     }
 
-    private func fetchImage(url: URL) async throws -> Data {
+    private func fetchImage(url: URL, urgency: PageLoadUrgency? = nil) async throws -> Data {
         var request = URLRequest(url: url)
         request.setValue(
             JMServiceProtocol.Header.identityEncoding,
@@ -1335,7 +1304,7 @@ final class APIClient: ObservableObject {
         )
         request.cachePolicy = .returnCacheDataElseLoad
         request.timeoutInterval = 8
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request, delegate: urgency)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
               Self.isLikelyImageData(
@@ -1349,7 +1318,7 @@ final class APIClient: ObservableObject {
 
     /// 类似 Happy Eyeballs：首线路先发，只在 1.25s 内没有结果时才逐步启动备用 CDN。
     /// 正常线路不会增加请求，而失效 CDN 也不再让每张图串行卡 8×4 秒。
-    private func firstImageData(path: String, domains: [String]) async -> ImageFetchResult? {
+    private func firstImageData(path: String, domains: [String], urgency: PageLoadUrgency? = nil) async -> ImageFetchResult? {
         let session = session
         let suffix = path.hasPrefix("/") ? path : "/" + path
         return await withTaskGroup(of: ImageFetchResult?.self) { group in
@@ -1368,7 +1337,7 @@ final class APIClient: ObservableObject {
                         )
                         request.cachePolicy = .returnCacheDataElseLoad
                         request.timeoutInterval = 8
-                        let (data, response) = try await session.data(for: request)
+                        let (data, response) = try await session.data(for: request, delegate: urgency)
                         guard let http = response as? HTTPURLResponse,
                               (200..<300).contains(http.statusCode),
                               Self.isLikelyImageData(
@@ -1587,22 +1556,26 @@ final class APIClient: ObservableObject {
     }
 }
 
-private actor AsyncPermitPool {
+actor AsyncPermitPool {
     private struct Waiter {
         let id: UUID
         let priority: TaskPriority
+        let urgency: PageLoadUrgency?
+        var currentPriority: TaskPriority { urgency?.priority ?? priority }
         let continuation: CheckedContinuation<Bool, Never>
     }
 
     private var limit: Int
+    private let reservedVisibleSlots: Int
     private var inUse = 0
     private var waiters: [Waiter] = []
 
-    init(limit: Int) {
+    init(limit: Int, reservedVisibleSlots: Int = 0) {
         self.limit = max(1, limit)
+        self.reservedVisibleSlots = reservedVisibleSlots
     }
 
-    func acquire(priority: TaskPriority, limit requestedLimit: Int) async throws {
+    func acquire(priority: TaskPriority, limit requestedLimit: Int, urgency: PageLoadUrgency? = nil) async throws {
         try Task.checkCancellation()
         limit = DownloadConcurrencyPreferences.bounded(requestedLimit)
         let id = UUID()
@@ -1611,7 +1584,7 @@ private actor AsyncPermitPool {
                 if Task.isCancelled {
                     continuation.resume(returning: false)
                 } else {
-                    waiters.append(Waiter(id: id, priority: priority, continuation: continuation))
+                    waiters.append(Waiter(id: id, priority: priority, urgency: urgency, continuation: continuation))
                     drain()
                 }
             }
@@ -1636,13 +1609,18 @@ private actor AsyncPermitPool {
         waiter.continuation.resume(returning: false)
     }
 
+    var waitingCount: Int { waiters.count }
+    func reprioritize() { drain() }
+
     private func drain() {
         while inUse < limit, !waiters.isEmpty {
             var selected = 0
             for index in waiters.indices.dropFirst()
-            where waiters[index].priority.rawValue > waiters[selected].priority.rawValue {
+            where waiters[index].currentPriority.rawValue > waiters[selected].currentPriority.rawValue {
                 selected = index
             }
+            if waiters[selected].currentPriority.rawValue < TaskPriority.userInitiated.rawValue,
+               inUse >= max(1, limit - reservedVisibleSlots) { return }
             let waiter = waiters.remove(at: selected)
             inUse += 1
             waiter.continuation.resume(returning: true)

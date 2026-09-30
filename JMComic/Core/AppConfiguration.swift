@@ -22,6 +22,22 @@ enum PageImageStorage: String, Codable, CaseIterable, Sendable {
 }
 
 enum PageImagePreferences {
+    static let prefetchCountKey = "reader.prefetchPagesEachSide"
+    static let defaultPrefetchCount = 2
+    static let prefetchRange = 0...6
+
+    static func prefetchCount(defaults: UserDefaults = .standard) -> Int {
+        let value = defaults.object(forKey: prefetchCountKey) == nil
+            ? defaultPrefetchCount : defaults.integer(forKey: prefetchCountKey)
+        return boundedPrefetchCount(value)
+    }
+    static func boundedPrefetchCount(_ value: Int) -> Int { min(prefetchRange.upperBound, max(0, value)) }
+    static func prefetchIndices(around index: Int, total: Int, count: Int) -> [Int] {
+        let count = boundedPrefetchCount(count)
+        guard total > 0, count > 0 else { return [] }
+        return (1...count).flatMap { [index + $0, index - $0] }.filter { (0..<total).contains($0) }
+    }
+
     static let repairChromaKey = "reader.repairChromaSeams"
     static let storageKey = "downloads.pageImageStorage"
 

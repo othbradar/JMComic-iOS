@@ -615,6 +615,10 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     /// starts it directly instead of releasing/reacquiring the same token, which
     /// also closes the rapid pause -> resume race around the limiter actor.
     private var globallyDeferredDescriptors: [String: PageDownloadDescriptor] = [:]
+    private let fileCommits = OfflineFileCommitQueue()
+    private let decodeWorkLock = NSLock()
+    private var decodeWorks: [String: (id: UUID, comicID: String, progressID: String, task: Task<Void, Never>)] = [:]
+    private var documentsRootOverride: URL?
     private let coverCacheLock = NSLock()
     private var coverCacheWorks: [String: CoverCacheWork] = [:]
     private var pendingProgressPublishes: [String: PendingProgressPublish] = [:]
@@ -644,6 +648,16 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
         migrateIndexedStorageLayoutIfNeeded()
         library = loadLibrary()
     }
+
+    /// Isolated storage for synthetic regression fixtures; production still
+    /// uses the shared database and existing migration/bootstrap entry point.
+    init(database: OfflineLibraryDatabase, documentsRoot: URL) {
+        self.database = database
+        self.documentsRootOverride = documentsRoot
+        super.init()
+        library = loadLibrary()
+    }
+
 
     var canPauseAllDownloads: Bool {
         DownloadGlobalControlPolicy.canPause(progress, globallyPaused: downloadsArePaused)
@@ -712,6 +726,9 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     @MainActor
     func enqueue(comic: ComicSummary, chapters: [Chapter], api: APIClient) async throws {
         guard let database else { throw OfflineLibraryDatabaseError.invalidData("数据库未初始化") }
+        guard !deletingComicIDs.contains(comic.id) else {
+            throw OfflineLibraryDatabaseError.invalidData("该离线漫画正在删除，请稍后重试")
+        }
         let imageProcessing = PageImagePreferences.processing()
         let imageStorage = PageImagePreferences.storage()
         setTombstoned(false, comicID: comic.id)
@@ -754,127 +771,133 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
                 // that request so downloads use the chosen route too.
                 let imageDomains = api.configuration.imageDomains
                 guard !imageDomains.isEmpty else { throw APIError.noAvailableDomain }
-                try database.upsertChapter(
-                    comicID: comic.id,
-                    chapter: chapter,
-                    expectedPageCount: detail.images.count
-                )
-                // Resolve once per chapter. Loading the whole SQLite library for
-                // every image used to make large chapters pause before starting.
-                let chapterDirectoryName = visibleChapterDirectoryName(
-                    for: chapter,
-                    comicID: comic.id
-                )
-                let originalRecords = try database.pageRecords(comicID: comic.id, chapterID: chapter.id)
-                var records = originalRecords
-                records = try repairUnsafeReservedPaths(
-                    records,
-                    comic: comic,
-                    storageDirectoryName: storageDirectoryName,
-                    chapterDirectoryName: chapterDirectoryName,
-                    database: database
-                )
-                var didMutateVisibleLibrary = records != originalRecords
-                for record in records where record.completed {
-                    let url = offlineRoot.appendingPathComponent(record.relativePath)
-                    if !FileManager.default.fileExists(atPath: url.path) {
-                        try database.deletePage(chapterID: chapter.id, pageIndex: record.pageIndex)
-                        didMutateVisibleLibrary = true
-                    }
-                }
-                records = try database.pageRecords(comicID: comic.id, chapterID: chapter.id)
-                if didMutateVisibleLibrary {
-                    // A completed file may have moved from an unsafe legacy path.
-                    // Keep localPageURLs correct in this process, not only after
-                    // the next application launch/database reload.
-                    library = loadLibrary()
-                }
-                let recordsByPage = Dictionary(uniqueKeysWithValues: records.map { ($0.pageIndex, $0) })
-                let alreadyDownloaded = records.filter { record in
-                    record.completed && FileManager.default.fileExists(
-                        atPath: offlineRoot.appendingPathComponent(record.relativePath).path
+                let referer = api.configuration.apiDomains.first ?? ""
+                let prepared = try await fileCommits.run { [self] in
+                    guard attemptRegistry.isCurrent(progressID: progressID, token: attemptID),
+                          !isTombstoned(comicID: comic.id) else { throw CancellationError() }
+                    try database.upsertChapter(
+                        comicID: comic.id,
+                        chapter: chapter,
+                        expectedPageCount: detail.images.count
                     )
-                }.count
-                updateProgress(id: "\(comic.id):\(chapter.id)") {
-                    $0.completedPages = alreadyDownloaded
-                    $0.totalPages = detail.images.count
-                    if alreadyDownloaded >= detail.images.count {
-                        $0.state = .finished
-                    } else {
-                        $0.state = self.isGlobalPauseRequested ? .paused : .downloading
-                    }
-                }
-                // Re-read after the chapter API await. Another re-entrant
-                // enqueue may have reserved pages for a different chapter of
-                // this comic while this call was suspended. The synchronous
-                // reserve loop below then owns a collision-free ordinal range.
-                var nextGlobalOrdinal = try database.nextGlobalOrdinal(comicID: comic.id)
-                var scheduledPageCount = 0
-                for (index, filename) in detail.images.enumerated() {
-                    let relativePath: String
-                    let globalOrdinal: Int
-                    if let record = recordsByPage[index] {
-                        relativePath = record.relativePath
-                        globalOrdinal = record.globalOrdinal
-                        if record.completed,
-                           FileManager.default.fileExists(atPath: offlineRoot.appendingPathComponent(relativePath).path) {
-                            continue
+                    // Resolve once per chapter. Loading the whole SQLite library for
+                    // every image used to make large chapters pause before starting.
+                    let chapterDirectoryName = visibleChapterDirectoryName(
+                        for: chapter,
+                        comicID: comic.id
+                    )
+                    let originalRecords = try database.pageRecords(comicID: comic.id, chapterID: chapter.id)
+                    var records = originalRecords
+                    records = try repairUnsafeReservedPaths(
+                        records,
+                        comic: comic,
+                        storageDirectoryName: storageDirectoryName,
+                        chapterDirectoryName: chapterDirectoryName,
+                        database: database
+                    )
+                    var didMutateVisibleLibrary = records != originalRecords
+                    for record in records where record.completed {
+                        let url = offlineRoot.appendingPathComponent(record.relativePath)
+                        if !FileManager.default.fileExists(atPath: url.path) {
+                            try database.deletePage(chapterID: chapter.id, pageIndex: record.pageIndex)
+                            didMutateVisibleLibrary = true
                         }
-                    } else {
-                        var candidate = visibleRelativePath(
-                            for: comic,
-                            storageDirectoryName: storageDirectoryName,
-                            chapterDirectoryName: chapterDirectoryName,
-                            imageNumber: nextGlobalOrdinal
+                    }
+                    records = try database.pageRecords(comicID: comic.id, chapterID: chapter.id)
+                    let recordsByPage = Dictionary(uniqueKeysWithValues: records.map { ($0.pageIndex, $0) })
+                    let alreadyDownloaded = records.filter { record in
+                        record.completed && FileManager.default.fileExists(
+                            atPath: offlineRoot.appendingPathComponent(record.relativePath).path
                         )
-                        while FileManager.default.fileExists(atPath: offlineRoot.appendingPathComponent(candidate).path) {
-                            nextGlobalOrdinal += 1
-                            candidate = visibleRelativePath(
+                    }.count
+                    // Reserve the ordinal range on the same serial queue as final
+                    // writes/deletion; a retry cannot race an older page commit.
+                    var nextGlobalOrdinal = try database.nextGlobalOrdinal(comicID: comic.id)
+                    var descriptors: [PageDownloadDescriptor] = []
+                    for (index, filename) in detail.images.enumerated() {
+                        let relativePath: String
+                        let globalOrdinal: Int
+                        if let record = recordsByPage[index] {
+                            relativePath = record.relativePath
+                            globalOrdinal = record.globalOrdinal
+                            if record.completed,
+                               FileManager.default.fileExists(atPath: offlineRoot.appendingPathComponent(relativePath).path) {
+                                continue
+                            }
+                        } else {
+                            var candidate = visibleRelativePath(
                                 for: comic,
                                 storageDirectoryName: storageDirectoryName,
                                 chapterDirectoryName: chapterDirectoryName,
                                 imageNumber: nextGlobalOrdinal
                             )
+                            while FileManager.default.fileExists(atPath: offlineRoot.appendingPathComponent(candidate).path) {
+                                nextGlobalOrdinal += 1
+                                candidate = visibleRelativePath(
+                                    for: comic,
+                                    storageDirectoryName: storageDirectoryName,
+                                    chapterDirectoryName: chapterDirectoryName,
+                                    imageNumber: nextGlobalOrdinal
+                                )
+                            }
+                            relativePath = candidate
+                            globalOrdinal = nextGlobalOrdinal
+                            try database.reservePage(
+                                chapterID: chapter.id,
+                                pageIndex: index,
+                                globalOrdinal: globalOrdinal,
+                                relativePath: relativePath
+                            )
+                            nextGlobalOrdinal += 1
                         }
-                        relativePath = candidate
-                        globalOrdinal = nextGlobalOrdinal
-                        try database.reservePage(
+                        let fileURL = offlineRoot.appendingPathComponent(relativePath)
+                        // 这里的路径已经由数据库预留，覆盖的只可能是本页自己的未完成文件。
+                        if FileManager.default.fileExists(atPath: fileURL.path) {
+                            try? FileManager.default.removeItem(at: fileURL)
+                        }
+                        let descriptor = PageDownloadDescriptor(
+                            comic: comic,
                             chapterID: chapter.id,
+                            chapterTitle: chapter.title,
+                            chapterSort: chapter.sort,
+                            scrambleID: detail.scrambleID,
+                            filename: filename,
                             pageIndex: index,
                             globalOrdinal: globalOrdinal,
-                            relativePath: relativePath
+                            totalPages: detail.images.count,
+                            relativePath: relativePath,
+                            imageDomains: imageDomains,
+                            domainIndex: 0,
+                            referer: referer,
+                            attemptID: attemptID,
+                            imageProcessing: imageProcessing,
+                            imageStorage: imageStorage
                         )
-                        nextGlobalOrdinal += 1
+                        descriptors.append(descriptor)
                     }
-                    let fileURL = offlineRoot.appendingPathComponent(relativePath)
-                    // 这里的路径已经由数据库预留，覆盖的只可能是本页自己的未完成文件。
-                    if FileManager.default.fileExists(atPath: fileURL.path) {
-                        try? FileManager.default.removeItem(at: fileURL)
-                    }
-                    let descriptor = PageDownloadDescriptor(
-                        comic: comic,
-                        chapterID: chapter.id,
-                        chapterTitle: chapter.title,
-                        chapterSort: chapter.sort,
-                        scrambleID: detail.scrambleID,
-                        filename: filename,
-                        pageIndex: index,
-                        globalOrdinal: globalOrdinal,
-                        totalPages: detail.images.count,
-                        relativePath: relativePath,
-                        imageDomains: imageDomains,
-                        domainIndex: 0,
-                        referer: api.configuration.apiDomains.first ?? "",
-                        attemptID: attemptID,
-                        imageProcessing: imageProcessing,
-                        imageStorage: imageStorage
-                    )
+                    return (descriptors, alreadyDownloaded, didMutateVisibleLibrary ? loadLibrary() : nil)
+                }
+                guard attemptRegistry.isCurrent(progressID: progressID, token: attemptID),
+                      !isTombstoned(comicID: comic.id) else { throw CancellationError() }
+                if let refreshed = prepared.2 { library = refreshed }
+                updateProgress(id: progressID) {
+                    $0.completedPages = prepared.1
+                    $0.totalPages = detail.images.count
+                    $0.state = prepared.1 >= detail.images.count ? .finished
+                        : (self.isGlobalPauseRequested ? .paused : .downloading)
+                }
+                var scheduledPageCount = 0
+                for descriptor in prepared.0 {
                     if schedule(descriptor) { scheduledPageCount += 1 }
                 }
                 if scheduledPageCount == 0 {
                     attemptRegistry.finishIfCurrent(progressID: progressID, token: attemptID)
                 }
             } catch {
+                // A deleted/replaced attempt must not recreate progress or
+                // alter the new generation after its metadata request returns.
+                guard attemptRegistry.isCurrent(progressID: progressID, token: attemptID),
+                      !isTombstoned(comicID: comic.id) else { throw CancellationError() }
                 // Earlier records in a multi-page legacy repair may already have
                 // committed before a later record fails. Reload those valid
                 // commits before presenting the error.
@@ -893,14 +916,17 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    func localPageURLs(comicID: String, chapterID: String) -> [URL] {
+    @MainActor
+    func localPageURLs(comicID: String, chapterID: String) async -> [URL] {
         guard let comic = library.first(where: { $0.id == comicID }),
               let chapter = comic.chapters.first(where: { $0.id == chapterID }),
               chapter.isComplete else { return [] }
-        let urls = chapter.relativePagePaths.map { offlineRoot.appendingPathComponent($0) }
-        guard urls.count == chapter.expectedPageCount,
-              urls.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else { return [] }
-        return urls
+        let root = JMComicStorageLayout.downloadRoot(documentsRoot: documentsRoot)
+        let urls = chapter.relativePagePaths.map { root.appendingPathComponent($0) }
+        guard urls.count == chapter.expectedPageCount else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            urls.allSatisfy { FileManager.default.fileExists(atPath: $0.path) } ? urls : []
+        }.value
     }
 
     func localCoverURL(for comic: OfflineComic) -> URL? {
@@ -922,7 +948,7 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
             if await Self.isDecodableCoverFile(at: url) {
                 return url
             }
-            invalidateCachedCover(comicID: comic.id, expectedURL: url)
+            await invalidateCachedCover(comicID: comic.id, expectedURL: url)
         }
         if let existing = coverCacheWork(for: comic.id) {
             return await existing.task.value
@@ -956,38 +982,24 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     /// can therefore repair a corrupt cover without being able to delete an
     /// arbitrary user-visible file or another comic's newer cache entry.
     @MainActor
-    func invalidateCachedCover(comicID: String, expectedURL: URL) {
+    func invalidateCachedCover(comicID: String, expectedURL: URL) async {
         guard let database else { return }
+        cancelCoverCacheWork(comicID: comicID)
+        let documents = documentsRoot
         let expected = expectedURL.standardizedFileURL
-        let indexedPath = try? database.comicCoverRelativePath(comicID: comicID)
-        let indexedURL = indexedPath.flatMap {
-            JMComicCoverCacheStorage.fileURL(
-                relativePath: $0,
-                documentsRoot: documentsRoot
-            )
-        }?.standardizedFileURL
-        let deterministicURL = JMComicCoverCacheStorage.fileURL(
-            relativePath: JMComicCoverCacheStorage.relativePath(comicID: comicID),
-            documentsRoot: documentsRoot
-        )?.standardizedFileURL
-        guard expected == indexedURL || expected == deterministicURL else { return }
-
-        let invalidRelativePath = indexedURL == expected
-            ? indexedPath
-            : JMComicCoverCacheStorage.relativePath(comicID: comicID)
-        if let invalidRelativePath {
-            try? database.clearCoverRelativePathReferences(invalidRelativePath)
-        }
-        if FileManager.default.fileExists(atPath: expected.path) {
-            try? FileManager.default.removeItem(at: expected)
-        }
-        if let index = library.firstIndex(where: { $0.id == comicID }),
-           library[index].coverRelativePath.flatMap({
-               JMComicCoverCacheStorage.fileURL(
-                   relativePath: $0,
-                   documentsRoot: documentsRoot
-               )
-           })?.standardizedFileURL == expected {
+        let removed = (try? await fileCommits.run { () -> Bool in
+            let indexedPath = try database.comicCoverRelativePath(comicID: comicID)
+            let indexedURL = indexedPath.flatMap {
+                JMComicCoverCacheStorage.fileURL(relativePath: $0, documentsRoot: documents)
+            }?.standardizedFileURL
+            let deterministicPath = JMComicCoverCacheStorage.relativePath(comicID: comicID)
+            let deterministicURL = JMComicCoverCacheStorage.fileURL(relativePath: deterministicPath, documentsRoot: documents)?.standardizedFileURL
+            guard expected == indexedURL || expected == deterministicURL else { return false }
+            try database.clearCoverRelativePathReferences(indexedURL == expected ? indexedPath! : deterministicPath)
+            if FileManager.default.fileExists(atPath: expected.path) { try FileManager.default.removeItem(at: expected) }
+            return true
+        }) == true
+        if removed, let index = library.firstIndex(where: { $0.id == comicID }) {
             library[index].coverRelativePath = nil
         }
     }
@@ -1014,6 +1026,7 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
         setTombstoned(true, comicID: comicID)
         cancelCoverCacheWork(comicID: comicID)
         attemptRegistry.invalidateComic(comicID)
+        cancelDecodeWorks(comicID: comicID)
         let removedProgressIDs = Array(progress.lazy
             .filter { $0.comicID == comicID }
             .map(\.id))
@@ -1025,10 +1038,10 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
             for task in tasks where self.descriptor(for: task)?.comic.id == comicID { task.cancel() }
         }
 
-        let downloadRoot = offlineRoot
+        let downloadRoot = JMComicStorageLayout.downloadRoot(documentsRoot: documentsRoot)
         let documentsRoot = documentsRoot
         do {
-            let refreshedLibrary = try await Task.detached(priority: .utility) {
+            let deleted = try await fileCommits.run {
                 let fileManager = FileManager.default
                 let indexedCoverPath = try database.comicCoverRelativePath(comicID: comicID)
                 let records = try database.allPageRecords(comicID: comicID)
@@ -1071,10 +1084,11 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
                           fileManager.fileExists(atPath: coverURL.path) else { continue }
                     try fileManager.removeItem(at: coverURL)
                 }
-                return try database.loadLibrary()
-            }.value
+                return (try database.loadLibrary(), ownedFiles)
+            }
 
-            library = refreshedLibrary
+            LocalPageImages.shared.invalidate(urls: deleted.1)
+            library = deleted.0
             progress.removeAll { $0.comicID == comicID }
             deletingComicIDs.remove(comicID)
         } catch {
@@ -1098,7 +1112,8 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private var documentsRoot: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        if let documentsRootOverride { return documentsRootOverride }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
     private var legacyRoot: URL {
@@ -1118,89 +1133,43 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    private func performCoverCache(
-        for comic: ComicSummary,
-        api: APIClient,
-        token: UUID
-    ) async throws -> URL {
+    private func performCoverCache(for comic: ComicSummary, api: APIClient, token: UUID) async throws -> URL {
         guard isCurrentCoverCacheWork(comicID: comic.id, token: token),
               !isTombstoned(comicID: comic.id) else { throw CancellationError() }
-        guard let database else {
-            throw OfflineLibraryDatabaseError.invalidData("数据库未初始化")
-        }
-
+        guard let database else { throw OfflineLibraryDatabaseError.invalidData("数据库未初始化") }
         let relativePath = JMComicCoverCacheStorage.relativePath(comicID: comic.id)
-        guard let destination = JMComicCoverCacheStorage.fileURL(
-            relativePath: relativePath,
-            documentsRoot: documentsRoot
-        ) else {
-            throw OfflineLibraryDatabaseError.invalidData("封面缓存路径无效")
-        }
-
-        let shouldDownload = !(await Self.isDecodableCoverFile(at: destination))
-
-        if shouldDownload {
-            // Reuse APIClient's memory cache and shared in-flight load. Calling
-            // imageData directly here would race the detail-page cover request
-            // and download the same image twice.
+        guard let destination = JMComicCoverCacheStorage.fileURL(relativePath: relativePath, documentsRoot: documentsRoot)
+        else { throw OfflineLibraryDatabaseError.invalidData("封面缓存路径无效") }
+        var encoded: Data?
+        if !(await Self.isDecodableCoverFile(at: destination)) {
             let image = try await api.displayImage(path: comic.coverPath)
-            guard let data = await Task.detached(priority: .utility, operation: { () -> Data? in
-                guard let encoded = image.jpegData(compressionQuality: 0.94),
-                      (try? ImageScrambler.rasterImage(from: encoded)) != nil else {
-                    return nil
-                }
-                return encoded
-            }).value else {
-                throw OfflineLibraryDatabaseError.invalidData("封面无法编码为 JPEG")
-            }
-            try Task.checkCancellation()
-            try await Task.detached(priority: .utility) {
-                let manager = FileManager.default
-                try manager.createDirectory(
-                    at: destination.deletingLastPathComponent(),
-                    withIntermediateDirectories: true,
-                    attributes: nil
-                )
-                // Some sideloaded builds/Files providers reject protection
-                // attributes even though ordinary writes work. Persistence is
-                // still valid, so protection remains best effort.
-                try? manager.setAttributes(
-                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                    ofItemAtPath: destination.deletingLastPathComponent().path
-                )
+            encoded = await Task.detached(priority: .utility) {
+                image.jpegData(compressionQuality: 0.94)
             }.value
+            guard encoded != nil else { throw OfflineLibraryDatabaseError.invalidData("封面无法编码为 JPEG") }
+        }
+        try Task.checkCancellation()
+        let bytes = encoded
+        // The guard, atomic file replacement and SQLite registration share the
+        // same queue as deletion. Delete invalidates tokens first and then
+        // queues removal, so an already-running commit is removed before a new
+        // enqueue can begin; a later old commit fails its token check here.
+        try await fileCommits.run { [self] in
             guard isCurrentCoverCacheWork(comicID: comic.id, token: token),
-                  !isTombstoned(comicID: comic.id),
-                  !Task.isCancelled else { throw CancellationError() }
-            // The last write and SQLite update are synchronous on MainActor.
-            // A delete/re-enqueue therefore cannot let an older generation
-            // remove or overwrite the newer generation's deterministic file.
-            try data.write(to: destination, options: .atomic)
-        }
-
-        guard isCurrentCoverCacheWork(comicID: comic.id, token: token),
-              !isTombstoned(comicID: comic.id),
-              !Task.isCancelled else { throw CancellationError() }
-        do {
-            try database.setComicCoverRelativePath(
-                comicID: comic.id,
-                relativePath: relativePath
-            )
-        } catch {
-            // The same physical cache file may already be referenced by one or
-            // more favorite accounts. Only remove an unowned file.
-            if (try? database.isCoverRelativePathReferenced(relativePath)) == false {
-                try? FileManager.default.removeItem(at: destination)
+                  !isTombstoned(comicID: comic.id) else { throw CancellationError() }
+            if let bytes { try writeVisibleImage(bytes, to: destination) }
+            do {
+                try database.setComicCoverRelativePath(comicID: comic.id, relativePath: relativePath)
+            } catch {
+                if (try? database.isCoverRelativePathReferenced(relativePath)) == false {
+                    try? FileManager.default.removeItem(at: destination)
+                }
+                throw error
             }
-            throw error
         }
         guard isCurrentCoverCacheWork(comicID: comic.id, token: token),
-              !isTombstoned(comicID: comic.id) else {
-            throw CancellationError()
-        }
-        if let index = library.firstIndex(where: { $0.id == comic.id }) {
-            library[index].coverRelativePath = relativePath
-        }
+              !isTombstoned(comicID: comic.id), !Task.isCancelled else { throw CancellationError() }
+        if let index = library.firstIndex(where: { $0.id == comic.id }) { library[index].coverRelativePath = relativePath }
         return destination
     }
 
@@ -1446,80 +1415,84 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func decodeAndStore(_ encrypted: Data, descriptor: PageDownloadDescriptor) {
-        guard !isTombstoned(comicID: descriptor.comic.id),
-              !isTerminallyFailed(progressID: descriptor.progressID),
-              isCurrentAttempt(descriptor) else {
-            finishTransfer(descriptor)
-            return
-        }
-        let decoded: ImageScrambler.EncodedPage
-        do {
-            decoded = try ImageScrambler.decode(
-                encrypted,
-                scrambleID: descriptor.scrambleID,
-                photoID: descriptor.chapterID,
-                filename: descriptor.filename,
-                processing: descriptor.imageProcessing ?? .faithful,
-                storage: descriptor.imageStorage ?? .lossless
-            )
-        } catch {
-            retryOrFail(descriptor, error: error.localizedDescription)
-            return
-        }
-
-        let storedDescriptor = descriptor.storing(decoded)
-        let destination = offlineRoot.appendingPathComponent(storedDescriptor.relativePath)
-        guard !isTombstoned(comicID: descriptor.comic.id),
-              !isTerminallyFailed(progressID: descriptor.progressID),
-              isCurrentAttempt(descriptor) else {
-            finishTransfer(descriptor)
-            return
-        }
-        do {
-            guard let database else { throw OfflineLibraryDatabaseError.invalidData("数据库未初始化") }
-            if storedDescriptor.relativePath != descriptor.relativePath {
-                // Never overwrite a different existing format at this name.
-                // Reserve the real extension before writing: an interrupted
-                // write stays pending and is recoverable through the index.
-                guard !FileManager.default.fileExists(atPath: destination.path) else {
-                    throw OfflineLibraryDatabaseError.invalidData("保存目标已存在：\(destination.lastPathComponent)")
+        let key = transferToken(for: descriptor)
+        let id = UUID()
+        decodeWorkLock.lock()
+        let task = Task.detached(priority: .utility) { [self] in
+            var transfersPermitToRetry = false
+            defer {
+                finishDecodeWork(key: key, id: id)
+                if !transfersPermitToRetry { finishTransfer(descriptor) }
+            }
+            guard isCurrentAttempt(descriptor), !isTombstoned(comicID: descriptor.comic.id) else { return }
+            do {
+                _ = try await ReadingImageMemory.shared.decode(
+                    data: encrypted, urgency: PageLoadUrgency(visible: false), bytesPerPixel: 20,
+                    consume: { [self] decoded in try await storeDecodedPage(decoded, descriptor: descriptor) }
+                ) {
+                    try ImageScrambler.decode(encrypted, scrambleID: descriptor.scrambleID,
+                        photoID: descriptor.chapterID, filename: descriptor.filename,
+                        processing: descriptor.imageProcessing ?? .faithful, storage: descriptor.imageStorage ?? .lossless)
                 }
-                try database.reservePage(
-                    chapterID: descriptor.chapterID,
-                    pageIndex: descriptor.pageIndex,
-                    globalOrdinal: descriptor.globalOrdinal,
-                    relativePath: storedDescriptor.relativePath
-                )
+            } catch {
+                guard isCurrentAttempt(descriptor), !isTombstoned(comicID: descriptor.comic.id) else { return }
+                if error is ReadingImageError || APIClient.isCancellation(error) {
+                    failAttemptWithoutRetry(descriptor, error: error.localizedDescription)
+                } else {
+                    // Retry owns the transfer permit until its eventual completion.
+                    transfersPermitToRetry = true
+                    retryOrFail(descriptor, error: error.localizedDescription)
+                }
             }
-            guard !isTombstoned(comicID: descriptor.comic.id),
-                  !isTerminallyFailed(progressID: descriptor.progressID),
-                  isCurrentAttempt(descriptor) else {
-                finishTransfer(descriptor)
-                return
-            }
-            try writeVisibleImage(decoded.data, to: destination)
-            guard !isTombstoned(comicID: descriptor.comic.id),
-                  !isTerminallyFailed(progressID: descriptor.progressID),
-                  isCurrentAttempt(descriptor) else {
-                try? FileManager.default.removeItem(at: destination)
-                finishTransfer(descriptor)
-                return
-            }
-            recordCompleted(storedDescriptor)
-            finishTransfer(descriptor)
-            // delete(comicID:) tombstones first and then removes all indexed
-            // files. If it raced between the guard and recordCompleted, the DB
-            // write is rejected; remove the just-written unindexed file here.
-            if isTombstoned(comicID: descriptor.comic.id)
-                || isTerminallyFailed(progressID: descriptor.progressID) {
-                try? FileManager.default.removeItem(at: destination)
-            }
-        } catch {
-            // This is now definitively our visible Documents write, not the
-            // transfer daemon's temp-file failure, so CDN retries cannot help.
-            failForLocalStorage(descriptor, destination: destination, error: error)
-            finishTransfer(descriptor)
         }
+        decodeWorks[key] = (id, descriptor.comic.id, descriptor.progressID, task)
+        decodeWorkLock.unlock()
+    }
+
+    private func storeDecodedPage(_ decoded: ImageScrambler.EncodedPage, descriptor: PageDownloadDescriptor) async throws {
+        try Task.checkCancellation()
+        let stored = descriptor.storing(decoded)
+        let destination = JMComicStorageLayout.downloadRoot(documentsRoot: documentsRoot).appendingPathComponent(stored.relativePath)
+        do {
+            try await fileCommits.run { [self] in
+                guard isCurrentAttempt(descriptor), !isTombstoned(comicID: descriptor.comic.id),
+                      !isTerminallyFailed(progressID: descriptor.progressID) else { throw CancellationError() }
+                guard let database else { throw OfflineLibraryDatabaseError.invalidData("数据库未初始化") }
+                if stored.relativePath != descriptor.relativePath {
+                    guard !FileManager.default.fileExists(atPath: destination.path) else {
+                        throw OfflineLibraryDatabaseError.invalidData("保存目标已存在：\(destination.lastPathComponent)")
+                    }
+                    try database.reservePage(chapterID: descriptor.chapterID, pageIndex: descriptor.pageIndex,
+                        globalOrdinal: descriptor.globalOrdinal, relativePath: stored.relativePath)
+                }
+                try writeVisibleImage(decoded.data, to: destination)
+                guard isCurrentAttempt(descriptor), !isTombstoned(comicID: descriptor.comic.id),
+                      !isTerminallyFailed(progressID: descriptor.progressID) else {
+                    try? FileManager.default.removeItem(at: destination)
+                    throw CancellationError()
+                }
+                recordCompleted(stored)
+            }
+            await LocalPageImages.shared.invalidate(urls: [destination])
+        } catch {
+            if !APIClient.isCancellation(error) { failForLocalStorage(descriptor, destination: destination, error: error) }
+        }
+    }
+
+    private func finishDecodeWork(key: String, id: UUID) {
+        decodeWorkLock.lock()
+        defer { decodeWorkLock.unlock() }
+        if decodeWorks[key]?.id == id { decodeWorks[key] = nil }
+    }
+
+    private func cancelDecodeWorks(comicID: String? = nil, progressID: String? = nil) {
+        decodeWorkLock.lock()
+        let tasks = decodeWorks.values.filter { work in
+            if let comicID { return work.comicID == comicID }
+            return work.progressID == progressID
+        }.map(\.task)
+        decodeWorkLock.unlock()
+        tasks.forEach { $0.cancel() }
     }
 
     private func retryOrFail(
@@ -1570,6 +1543,7 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     ) {
         guard isCurrentAttempt(descriptor) else { return }
         setTerminallyFailed(true, progressID: descriptor.progressID)
+        cancelDecodeWorks(progressID: descriptor.progressID)
         removeGloballyDeferredDescriptors { $0.progressID == descriptor.progressID }
         foregroundSession.getAllTasks { tasks in
             for task in tasks {

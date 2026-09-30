@@ -119,3 +119,64 @@ xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobil
 ### 本批提交授权
 
 - 用户确认“提交”。提交前再次核对 HEAD、工作区与暂存区，只有本批上述 4 个文件；沿用已记录的验证结果与人工检查限制，此次未重复测试。仅作本地提交，不推送。
+
+## 2026-09-30：当前页优先、离线复用与长图预算
+
+- 基线 `13bbdaee88856236e6d4e4b0c60eb27551baf41e`，分支 `codex/root-tab-resident-pages-v6`；开始时工作区干净。已执行 `git status --short --branch`、`git rev-parse HEAD`、`xcodebuild -list -project JMComic.xcodeproj`、`xcrun simctl list devices booted`，阅读 README、CONTRIBUTING、project.yml 与实际调用链。未 pull、切分支、清理工作区、修改签名/发布配置或提交。
+- 调用链：`ReaderView → OnlinePageView → decodedPageImage → performDecodedPageLoad → prioritizedImageData → URLSession → ImageScrambler`；本地为 `localPageURLs → LocalPageView → 文件读取/栅格解码`；下载为普通 dataTask 回调 → `decodeAndStore → 文件/SQLite`，封面为 `ensureCoverCached → performCoverCache`。网络许可原本就会在收到数据后释放，未占用解码阶段；真正缺口是预取无独立优先级/使用者退出管理、像素解码无统一预算、本地页面反复读盘解码，以及下载封面最终提交仍在主线程。
+- 新增小型阅读加载器，在线/本地共享缓存预算和解码准入。每个页面/预取持有独立使用权；预取可提升既有请求的队列和 URLSessionTask 优先级，不另发请求；最后一个使用者退出才取消任务。代次同时保护元数据、缓存、页面结果和章节加载。内存警告清空成品缓存并取消纯推测消费者，不误取消仍有页面等待的任务。
+- 阅读会话集中维护前后窗口，默认各 2 页，设置范围 0…6；设置在“阅读预取”，与网络并发分开，说明受“显示说明文字”控制。移除原本逐页完成后继续发散预取的调用；翻远、换章、退出会取消过期窗口。近邻已实例化行和真正可见行共用同一加载结果，超出范围会释放行持有的图片。
+- 保守默认：阅读源数据流水线最多 3 项，其中预留 1 个可见页位置；网络继续使用用户现有并发设置，并为可见页保留位置。图片后台解码最多 2 项，按在线/本地 16 B/像素、下载含编码 20 B/像素估算临时工作区；成品 LRU 最多 12 张/64 MiB，与已收到的压缩数据、工作区共同计入 192 MiB 软预算。超过软预算的单图独占，估算工作区超过 512 MiB 或异常大的输入明确可恢复失败，不降采样；不会永远等许可。下载编码结果等待串行落盘期间也持续计入预算。
+- 以上是准入估算，**不是进程峰值内存硬上限**：URLSession 接收中的数据、UIKit 持有的可见图片、ImageIO 内部开销，以及既有独立封面缓存不等同于阅读 LRU。网络等待、解码等待、文件提交等待分别管理；没有根据这些测试宣称真机帧率或内存数值。
+- 本地缓存键包含存储像素处理版本、规范化文件 URL、设备/inode、大小、mtime/ctime 纳秒信息；读盘、头信息和解码均后台执行，合并进行中的读取。替换后重新校验，删除/重新写入主动失效，回到前台重新验证文件版本；旧 JPEG 继续按原像素读取，不重解扰、不转换整库。缓存仅保留有限图片和 256 项尺寸元数据。
+- 占位比例使用 ImageIO 头信息，在线复用已有响应、本地只读取所需文件头，不为尺寸完整解码/下载整章。尺寸到达时使用上一批的页内归一化锚点补偿，未新增逐帧 scrollTo 或另一套阅读器。
+- 下载封面最终原子写入、索引登记、页面路径预留/旧文件处理、页面提交和删除进入同一后台串行队列；队列内校验 token/tombstone，删除结束前禁止重新加入。也修复章节元数据晚到后可能继续登记旧任务的问题。保留既有普通下载、并发控制和进度合并；文件扩展名/保真策略与上一批一致。
+
+### 验证及实际命令
+
+- 16 项不同的定向 XCTest 通过（新增 9 项，复用 7 项），没有运行全量测试或 Instruments。合成夹具覆盖共享提升/使用者取消、旧代次晚到、超时重试、前后窗口跳远退出、完整 128×8192 长图、两项解码上限与大图独占、等待取消、编码输出等待提交时的预算、本地替换逐像素核对/旧 JPEG/内存警告、封面删除后重下载与旧章节元数据晚到、占位尺寸变化页内锚点；没有使用账号凭据或实际漫画做夹具。
+- `Artifacts/reading-scheduler/targeted.log/.xcresult`：iPhone 13 项通过；`boundaries.log/.xcresult`：iPhone 3 项通过；`ipad-final.log/.xcresult`：iPad 10 项通过；`commit-memory.log/.xcresult`：最后修改涉及的 iPhone 4 项通过。每份日志首段 `Command line invocation` 保留完整实际命令及所有 only-testing 参数。
+- 首次 `build.log` 因 continuation 类型推断与 stat 调用失败，修正后 `build-fixed.log` 成功；最终 `complete-app-build.log` 成功，只有 AppIntents metadata 提示。测试日志存在 AttributeGraph cycle 提示；上一批 `Artifacts/gesture-focal/final-targeted.log` 已有同类提示，本批未以测试通过声称消除这些提示。
+
+最后补测实际命令：
+
+```sh
+xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug \
+  -destination 'platform=iOS Simulator,id=88E155ED-2CC4-4266-8137-148FD7FBB757' \
+  -derivedDataPath build/reading-scheduler-tests \
+  -resultBundlePath Artifacts/reading-scheduler/commit-memory.xcresult \
+  -parallel-testing-enabled NO \
+  -only-testing:JMComicTests/JMComicTests/testDownloadEncodedOutputStaysBudgetedUntilCommit \
+  -only-testing:JMComicTests/JMComicTests/testReadingLongImageDecodeBudgetAndRecoverableOversize \
+  -only-testing:JMComicTests/JMComicTests/testLateChapterMetadataCannotRecreateDeletedDownload \
+  -only-testing:JMComicTests/JMComicTests/testLateCoverCannotOverwriteDeleteAndRedownload \
+  CODE_SIGNING_ALLOWED=NO test > Artifacts/reading-scheduler/commit-memory.log 2>&1
+```
+
+最终完整 App 构建/安装/启动（全部成功）：
+
+```sh
+xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath build/reading-scheduler-app \
+  CODE_SIGNING_ALLOWED=NO build > Artifacts/reading-scheduler/complete-app-build.log 2>&1
+xcrun simctl terminate 88E155ED-2CC4-4266-8137-148FD7FBB757 io.github.jmcomic.mobile
+xcrun simctl install 88E155ED-2CC4-4266-8137-148FD7FBB757 /Users/othbradar/PycharmProjects/JMComic-iOS/build/reading-scheduler-app/Build/Products/Debug-iphonesimulator/JMComic.app
+xcrun simctl launch 88E155ED-2CC4-4266-8137-148FD7FBB757 io.github.jmcomic.mobile
+xcrun simctl terminate 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobile
+xcrun simctl install 467D92A6-2187-48A6-BF24-9824B48313B1 /Users/othbradar/PycharmProjects/JMComic-iOS/build/reading-scheduler-app/Build/Products/Debug-iphonesimulator/JMComic.app
+xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobile
+```
+
+- 环境 Xcode 26.6 / iOS 26.5 Simulator；iPhone 17 Pro Max `88E155ED-2CC4-4266-8137-148FD7FBB757`、iPad Pro 11-inch (M5) `467D92A6-2187-48A6-BF24-9824B48313B1`。完整产物路径如上，bundle ID 仍为 `io.github.jmcomic.mobile`，这是 Simulator `.app`，不是 IPA。
+- 安装详情、get_app_container 和 SHA-256 校验见 `delivery-install.log`。两端已安装主程序/debug dylib 与最终产物一致。覆盖安装使容器路径 UUID 改变；早先 `install.log` 的 `preserved=False` 仅比较路径字符串，不能据此认定数据丢失。最终再次安装前后，iPad 原 25 个下载文件的相对路径/大小清单一致（共 12,347,673 字节），iPhone 原无下载仍无下载；没有卸载或清数据。iPad 界面确认原登录状态、离线章节和阅读页仍可用。
+- CUA smoke：iPad 设置预取 2→3→2、说明文字开关显示/隐藏并恢复原值；已打开既有离线连续阅读并观察图片显示，最终安装后再次打开同一章节。iPhone 首页与在线详情能够加载，详情按钮返回成功；两端启动正常。
+
+### 待人工检查 / 未执行
+
+- CUA 拖动没有可靠地产生 Simulator 滚动，部分底部导航/阅读控制在 AX 中不暴露且坐标点击未可靠生效。因此快速往返翻页、远距离跳转/换章、长图回看手感、iPhone 设置切换、在线阅读完整界面及同时下载时普通浏览的完整 UI smoke **未执行完成**，请人工检查；请求/解码/离线文件链路已按上文合成测试验证。
+- 真机帧率、峰值内存、触控手感 **未执行**。本批不报告性能提升百分比，不把模拟器或编译结果当成真机验收。
+- `git diff --check` 通过；本批未暂存、未提交、未推送。交付完整 App，等待人工检查。
+
+### 本批提交授权
+
+- 用户确认“那就提交”。提交前再次核对 HEAD、工作区、暂存区和已完成的构建/测试/安装日志；暂存区原为空，范围仅为本批 11 个文件。沿用上述验证，此次未重复构建或运行测试；只作本地提交，不推送。

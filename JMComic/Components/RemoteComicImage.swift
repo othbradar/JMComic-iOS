@@ -489,7 +489,7 @@ struct OfflineComicCoverView: View {
                 return
             }
             guard !Task.isCancelled else { return }
-            downloads.invalidateCachedCover(comicID: item.id, expectedURL: local)
+            await downloads.invalidateCachedCover(comicID: item.id, expectedURL: local)
         }
 
         // A corrupt legacy/local file is invalidated above and gets exactly
@@ -509,7 +509,7 @@ struct OfflineComicCoverView: View {
             image = loaded
             error = nil
         } else {
-            downloads.invalidateCachedCover(comicID: item.id, expectedURL: url)
+            await downloads.invalidateCachedCover(comicID: item.id, expectedURL: url)
             error = "封面缓存无法读取"
         }
     }

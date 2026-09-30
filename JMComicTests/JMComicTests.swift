@@ -4461,3 +4461,359 @@ private final class PageFixtureURLProtocol: URLProtocol {
         client?.urlProtocolDidFinishLoading(self)
     }
 }
+
+extension JMComicTests {
+    @MainActor
+    private func eventually(_ condition: @escaping @MainActor () async -> Bool,
+                            file: StaticString = #filePath, line: UInt = #line) async throws {
+        for _ in 0..<300 {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for synthetic operation", file: file, line: line)
+        throw URLError(.timedOut)
+    }
+
+    @MainActor
+    func testReadingLoaderPromotesSharedRequestAndCancelsByConsumer() async throws {
+        let loader = ReadingImageLoader(memory: ReadingImageMemory())
+        let data = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 37, height: 173), width: 37, height: 173).pngData())
+        var starts = 0
+        var urgency: PageLoadUrgency?
+        var sourceResult: CheckedContinuation<Data, Error>?
+        let source: @MainActor (PageLoadUrgency, @escaping ReadingImageLoader.Metadata) async throws -> Data = { value, _ in
+            starts += 1; urgency = value
+            return try await withCheckedThrowingContinuation { sourceResult = $0 }
+        }
+        let prefetch = Task { try await loader.image(key: "same", visible: false, source: source, decode: { try ImageScrambler.rasterImage(from: $0) }) }
+        try await eventually { starts == 1 }
+        XCTAssertFalse(try XCTUnwrap(urgency).isVisible)
+        let visible = Task { try await loader.image(key: "same", visible: true, source: source, decode: { try ImageScrambler.rasterImage(from: $0) }) }
+        try await eventually { urgency?.isVisible == true }
+        prefetch.cancel()
+        do { _ = try await prefetch.value; XCTFail("Cancelled consumer returned image") } catch is CancellationError {}
+        XCTAssertEqual(loader.inFlightCount, 1)
+        XCTAssertEqual(starts, 1)
+        sourceResult?.resume(returning: data)
+        let first = try await visible.value
+        let cached = try await loader.image(key: "same", source: source, decode: { try ImageScrambler.rasterImage(from: $0) })
+        XCTAssertTrue(first === cached)
+        XCTAssertEqual(starts, 1)
+        XCTAssertEqual(loader.knownSize(key: "same"), CGSize(width: 37, height: 173))
+        XCTAssertEqual(loader.inFlightCount, 0)
+
+        // Promotion changes the existing transport, without resuming any real request.
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let transport = session.dataTask(with: URL(string: "https://synthetic.invalid")!)
+        let priority = PageLoadUrgency(visible: false)
+        priority.urlSession(session, didCreateTask: transport)
+        XCTAssertEqual(transport.priority, URLSessionTask.lowPriority)
+        priority.setVisible(true)
+        XCTAssertEqual(transport.priority, URLSessionTask.highPriority)
+    }
+
+    @MainActor
+    func testReadingLoaderLastConsumerCancellationFailureAndRetry() async throws {
+        let loader = ReadingImageLoader(memory: ReadingImageMemory())
+        var started = false, sourceCancelled = false
+        let source: @MainActor (PageLoadUrgency, @escaping ReadingImageLoader.Metadata) async throws -> Data = { _, _ in
+            started = true
+            do { try await Task.sleep(for: .seconds(30)); return Data() }
+            catch { sourceCancelled = true; throw error }
+        }
+        let first = Task { try await loader.image(key: "cancel", source: source, decode: { try ImageScrambler.rasterImage(from: $0) }) }
+        try await eventually { started }
+        let second = Task { try await loader.image(key: "cancel", source: source, decode: { try ImageScrambler.rasterImage(from: $0) }) }
+        // Let the second consumer register before retiring the first.
+        try await Task.sleep(for: .milliseconds(20))
+        first.cancel()
+        _ = await first.result
+        XCTAssertFalse(sourceCancelled)
+        second.cancel()
+        _ = await second.result
+        try await eventually { sourceCancelled && loader.inFlightCount == 0 }
+
+        do {
+            _ = try await loader.image(key: "retry", source: { _, _ in throw URLError(.timedOut) }, decode: { try ImageScrambler.rasterImage(from: $0) })
+            XCTFail("Timeout returned an image")
+        } catch let error as URLError { XCTAssertEqual(error.code, .timedOut) }
+        XCTAssertEqual(loader.inFlightCount, 0)
+        let data = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 11, height: 53), width: 11, height: 53).pngData())
+        let recovered = try await loader.image(key: "retry", source: { _, _ in data }, decode: { try ImageScrambler.rasterImage(from: $0) })
+        XCTAssertEqual(recovered.size, CGSize(width: 11, height: 53))
+
+        var lateSource: CheckedContinuation<Data, Error>?
+        let retired = Task { try await loader.image(key: "generation", source: { _, _ in
+            try await withCheckedThrowingContinuation { lateSource = $0 }
+        }, decode: { try ImageScrambler.rasterImage(from: $0) }) }
+        try await eventually { lateSource != nil }
+        retired.cancel()
+        _ = await retired.result
+        let replacement = try await loader.image(key: "generation", source: { _, _ in data }, decode: { try ImageScrambler.rasterImage(from: $0) })
+        lateSource?.resume(returning: Data())
+        try await Task.sleep(for: .milliseconds(20))
+        let stillCurrent = try await loader.image(key: "generation", source: { _, _ in XCTFail("Old generation evicted new cache"); return data }, decode: { try ImageScrambler.rasterImage(from: $0) })
+        XCTAssertTrue(replacement === stillCurrent)
+    }
+
+    @MainActor
+    func testReadingPermitPromotionAndBoundedPrefetchWindow() async throws {
+        let gate = AsyncPermitPool(limit: 2, reservedVisibleSlots: 1)
+        try await gate.acquire(priority: .utility, limit: 2)
+        let urgency = PageLoadUrgency(visible: false)
+        var promotedEntered = false
+        let queued = Task {
+            try await gate.acquire(priority: .utility, limit: 2, urgency: urgency)
+            promotedEntered = true
+            await gate.release()
+        }
+        try await eventually { await gate.waitingCount == 1 }
+        XCTAssertFalse(promotedEntered)
+        urgency.setVisible(true)
+        await gate.reprioritize()
+        try await queued.value
+        XCTAssertTrue(promotedEntered)
+        await gate.release()
+
+        let owner = UUID(), window = ReadingPrefetchWindow()
+        var active = Set<Int>()
+        let load: @MainActor (Int) async -> Void = { index in
+            active.insert(index)
+            defer { active.remove(index) }
+            try? await Task.sleep(for: .seconds(30))
+        }
+        XCTAssertEqual(PageImagePreferences.boundedPrefetchCount(99), 6)
+        XCTAssertEqual(PageImagePreferences.prefetchIndices(around: 0, total: 100, count: 2), [1, 2])
+        window.update(owner: owner, prefix: "chapter", indices: PageImagePreferences.prefetchIndices(around: 5, total: 100, count: 2), load: load)
+        try await eventually { active == Set([3, 4, 6, 7]) }
+        window.update(owner: owner, prefix: "chapter", indices: PageImagePreferences.prefetchIndices(around: 80, total: 100, count: 2), load: load)
+        try await eventually { active == Set([78, 79, 81, 82]) }
+        window.cancel(owner: owner)
+        try await eventually { active.isEmpty }
+    }
+
+    @MainActor
+    func testReadingLongImageDecodeBudgetAndRecoverableOversize() async throws {
+        let data = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 128, height: 8192), width: 128, height: 8192).pngData())
+        let normal = ReadingImageMemory(softBytes: 64 * 1_024 * 1_024, maximumImageBytes: 96 * 1_024 * 1_024)
+        let peak = SyntheticDecodePeak()
+        let jobs = (0..<4).map { _ in Task {
+            try await normal.decode(data: data, urgency: PageLoadUrgency(visible: true)) {
+                peak.begin(); defer { peak.end() }
+                Thread.sleep(forTimeInterval: 0.05)
+                return try ImageScrambler.rasterImage(from: data)
+            }
+        } }
+        for job in jobs {
+            let image = try await job.value
+            XCTAssertEqual(image.cgImage?.width, 128)
+            XCTAssertEqual(image.cgImage?.height, 8192)
+        }
+        XCTAssertEqual(peak.maximum, 2)
+        XCTAssertEqual(normal.activeDecodeCount, 0)
+        XCTAssertEqual(normal.bufferedBytes, 0)
+
+        let exclusive = ReadingImageMemory(softBytes: 8 * 1_024 * 1_024, maximumImageBytes: 96 * 1_024 * 1_024)
+        let exclusivePeak = SyntheticDecodePeak()
+        let largeJobs = (0..<2).map { _ in Task {
+            try await exclusive.decode(data: data, urgency: PageLoadUrgency(visible: true)) {
+                exclusivePeak.begin(); defer { exclusivePeak.end() }
+                Thread.sleep(forTimeInterval: 0.04)
+                return try ImageScrambler.rasterImage(from: data)
+            }
+        } }
+        for job in largeJobs { _ = try await job.value }
+        XCTAssertEqual(exclusivePeak.maximum, 1)
+        do {
+            try await exclusive.acquire(id: UUID(), size: CGSize(width: 100_000, height: 100_000), bytesPerPixel: 16, urgency: PageLoadUrgency(visible: true))
+            XCTFail("Oversize input must fail instead of waiting forever")
+        } catch ReadingImageError.resourceLimit {}
+        XCTAssertEqual(exclusive.activeDecodeCount, 0)
+        XCTAssertEqual(exclusive.bufferedBytes, 0)
+        let held = UUID()
+        try await exclusive.acquire(id: held, size: CGSize(width: 128, height: 8192), bytesPerPixel: 16, urgency: PageLoadUrgency(visible: true))
+        let waiting = Task { try await exclusive.acquire(id: UUID(), size: CGSize(width: 128, height: 8192), bytesPerPixel: 16, urgency: PageLoadUrgency(visible: false)) }
+        try await Task.sleep(for: .milliseconds(20))
+        waiting.cancel()
+        do { try await waiting.value; XCTFail("Cancelled decode waiter acquired") } catch is CancellationError {}
+        exclusive.release(held)
+        XCTAssertEqual(exclusive.activeDecodeCount, 0)
+    }
+
+    @MainActor
+    func testLocalPageSharingReplacementDeletionAndMemoryWarning() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("page.png")
+        let oldData = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 32, height: 4096), width: 32, height: 4096).pngData())
+        try oldData.write(to: url, options: .atomic)
+        let memory = ReadingImageMemory(), local = LocalPageImages(memory: memory)
+        async let a = local.image(url: url)
+        async let b = local.image(url: url)
+        let (first, second) = try await (a, b)
+        XCTAssertTrue(first === second)
+        let revisit = try await local.image(url: url)
+        XCTAssertTrue(first === revisit)
+        let replacementData = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 33, height: 4101), width: 33, height: 4101).pngData())
+        try replacementData.write(to: url, options: .atomic)
+        let replacement = try await local.image(url: url)
+        XCTAssertFalse(replacement === first)
+        XCTAssertEqual(replacement.size, CGSize(width: 33, height: 4101))
+        assertSamePixels(try normalizedPixels(replacement), try normalizedPixels(ImageScrambler.rasterImage(from: replacementData)))
+        XCTAssertGreaterThan(memory.cacheBytes, 0)
+        NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+        try await eventually { memory.cacheBytes == 0 }
+        try FileManager.default.removeItem(at: url)
+        local.invalidate(urls: [url])
+        do { _ = try await local.image(url: url); XCTFail("Deleted file returned a cached image") } catch {}
+        // An existing legacy JPEG continues through the same local loader.
+        let legacy = directory.appendingPathComponent("legacy.jpg")
+        try XCTUnwrap(replacement.jpegData(compressionQuality: 0.96)).write(to: legacy)
+        let jpeg = try await local.image(url: legacy)
+        XCTAssertEqual(jpeg.size, replacement.size)
+    }
+
+    @MainActor
+    func testLateCoverCannotOverwriteDeleteAndRedownload() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OfflineLibraryDatabase(databaseURL: directory.appendingPathComponent("fixture.db"))
+        let comic = ComicSummary(id: "synthetic-cover", name: "Synthetic", authors: ["Fixture"])
+        try database.upsertComic(comic, storageDirectoryName: "Synthetic-Fixture")
+        let manager = DownloadManager(database: database, documentsRoot: directory)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PageFixtureURLProtocol.self]
+        configuration.urlCache = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); PageFixtureURLProtocol.handle = nil }
+        func api(_ host: String) -> APIClient {
+            APIClient(secureStore: PageFixtureSecureStore(), configuration: AppConfiguration(apiDomains: [], imageDomains: [host], appVersion: "test"), session: session, requiresBootstrap: false)
+        }
+        let oldAPI = api("https://old-cover.invalid"), newAPI = api("https://new-cover.invalid")
+        let data = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 31, height: 49), width: 31, height: 49).pngData())
+        let oldData = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 17, height: 23), width: 17, height: 23).pngData())
+        var oldRequest: PageFixtureURLProtocol?
+        PageFixtureURLProtocol.handle = { request in
+            DispatchQueue.main.async {
+                if request.request.url?.host == "old-cover.invalid" { oldRequest = request }
+                else { request.respond(data) }
+            }
+        }
+        let old = Task { await manager.ensureCoverCached(for: comic, api: oldAPI) }
+        try await eventually { oldRequest != nil }
+        try await manager.delete(comicID: comic.id)
+        XCTAssertTrue(try database.loadLibrary().isEmpty)
+        try await manager.enqueue(comic: comic, chapters: [], api: newAPI)
+        let resultURL = await manager.ensureCoverCached(for: comic, api: newAPI)
+        let newURL = try XCTUnwrap(resultURL)
+        let newBytes = try Data(contentsOf: newURL)
+        XCTAssertEqual(try ImageScrambler.rasterImage(from: newBytes).size, CGSize(width: 31, height: 49))
+        oldRequest?.respond(oldData)
+        let lateResult = await old.value
+        XCTAssertNil(lateResult)
+        XCTAssertEqual(try Data(contentsOf: newURL), newBytes)
+        XCTAssertEqual(try database.comicCoverRelativePath(comicID: comic.id), JMComicCoverCacheStorage.relativePath(comicID: comic.id))
+        XCTAssertEqual(try database.loadLibrary().count, 1)
+    }
+}
+
+private final class SyntheticDecodePeak: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = 0
+    private var peak = 0
+    var maximum: Int { lock.lock(); defer { lock.unlock() }; return peak }
+    func begin() { lock.lock(); active += 1; peak = max(peak, active); lock.unlock() }
+    func end() { lock.lock(); active -= 1; lock.unlock() }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testLateChapterMetadataCannotRecreateDeletedDownload() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OfflineLibraryDatabase(databaseURL: directory.appendingPathComponent("fixture.db"))
+        let manager = DownloadManager(database: database, documentsRoot: directory)
+        let comic = ComicSummary(id: "synthetic-late", name: "Synthetic")
+        let chapter = Chapter(id: "123", title: "Fixture", sort: 1)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PageFixtureURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); PageFixtureURLProtocol.handle = nil }
+        let api = APIClient(secureStore: PageFixtureSecureStore(), configuration: AppConfiguration(apiDomains: ["https://metadata.invalid"], imageDomains: ["https://cover.invalid"], appVersion: "test"), session: session, requiresBootstrap: false)
+        let cover = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 11, height: 19), width: 11, height: 19).pngData())
+        var pending: PageFixtureURLProtocol?
+        PageFixtureURLProtocol.handle = { request in
+            DispatchQueue.main.async {
+                if request.request.url?.path == "/chapter" { pending = request }
+                else if request.request.url?.host == "cover.invalid" { request.respond(cover) }
+                else { request.respond(Data("var scramble_id = 220980;".utf8)) }
+            }
+        }
+        let old = Task { try await manager.enqueue(comic: comic, chapters: [chapter], api: api) }
+        try await eventually { pending != nil }
+        try await manager.delete(comicID: comic.id)
+        try await manager.enqueue(comic: comic, chapters: [], api: api)
+        pending?.respond(try JSONSerialization.data(withJSONObject: ["code": 200, "data": ["id": chapter.id, "images": ["00001.png"]]]))
+        do { try await old.value; XCTFail("Old metadata must retire") } catch is CancellationError {}
+        XCTAssertTrue(try database.loadLibrary().first?.chapters.isEmpty == true)
+        XCTAssertTrue(try database.allPageRecords(comicID: comic.id).isEmpty)
+        XCTAssertTrue(manager.progress.isEmpty)
+        _ = await manager.ensureCoverCached(for: comic, api: api)
+    }
+
+    @MainActor
+    func testPlaceholderSizeArrivalUsesExistingPageAnchor() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+        let host = UIViewController()
+        window.rootViewController = host; window.isHidden = false
+        let scroll = UIScrollView(frame: window.bounds)
+        host.view.addSubview(scroll)
+        scroll.contentSize = CGSize(width: 400, height: 10_000)
+        scroll.contentOffset = CGPoint(x: 0, y: 2300)
+        let zoom = ReaderContinuousZoomController()
+        defer { zoom.detach(); window.isHidden = true }
+        let marker = ReaderPageGeometryMarker.Marker(frame: CGRect(x: 0, y: 2100, width: 400, height: 800))
+        marker.index = 3; marker.zoom = zoom
+        scroll.addSubview(marker)
+        zoom.register(marker); zoom.viewportChanged(to: scroll.bounds.size); zoom.didScroll()
+        // An earlier placeholder grows, shifting this page's origin, while
+        // this page's header also doubles its estimated height. Preserve 75%.
+        zoom.pageSizeWillChange(index: 2)
+        marker.frame = CGRect(x: 0, y: 3100, width: 400, height: 1600)
+        scroll.contentSize.height = 12_000
+        zoom.geometryChanged()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(scroll.contentOffset.y, 3900, accuracy: 0.5)
+        XCTAssertFalse(zoom.isAdjustingFocus)
+        XCTAssertEqual(zoom.scale, 1)
+    }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testDownloadEncodedOutputStaysBudgetedUntilCommit() async throws {
+        let memory = ReadingImageMemory(softBytes: 8 * 1_024 * 1_024, maximumDecodes: 1)
+        let data = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 32, height: 2048), width: 32, height: 2048).pngData())
+        let saving = expectation(description: "output waiting for serial commit")
+        let job = Task {
+            try await memory.decode(data: data, urgency: PageLoadUrgency(visible: false), bytesPerPixel: 20,
+                consume: { _ in
+                    saving.fulfill()
+                    try await Task.sleep(for: .seconds(30))
+                }
+            ) { data }
+        }
+        await fulfillment(of: [saving], timeout: 3)
+        XCTAssertEqual(memory.activeDecodeCount, 1)
+        XCTAssertGreaterThan(memory.activeBytes, data.count)
+        XCTAssertEqual(memory.bufferedBytes, data.count)
+        job.cancel()
+        do { _ = try await job.value; XCTFail("Cancelled commit did not end") } catch is CancellationError {}
+        XCTAssertEqual(memory.activeDecodeCount, 0)
+        XCTAssertEqual(memory.bufferedBytes, 0)
+    }
+}

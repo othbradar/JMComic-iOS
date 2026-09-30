@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		FCE032DEDC4E4A28A5B19031 /* ReadingImageLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A680A02D72D249C3A8F30926 /* ReadingImageLoader.swift */; };
 		08EE80C0ED5B2739E52B114D /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9B79129F6F2C41177223632 /* AppAppearance.swift */; };
 		0A60C4C33584C0BD6AC1B38E /* OfflineLibraryDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = D27F8ABB245769E2413AC25C /* OfflineLibraryDatabase.swift */; };
 		124E66C46A3F66D633DF42FB /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 2ED2A6090FACA4EA4BEAEB8A /* libsqlite3.tbd */; };
@@ -51,6 +52,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A680A02D72D249C3A8F30926 /* ReadingImageLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingImageLoader.swift; sourceTree = "<group>"; };
 		0100821D62815085A0857E73 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0102A9EB56FCCF052B4E13F6 /* ExploreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreView.swift; sourceTree = "<group>"; };
 		05FED1B15EFAF4AF8FA1F776 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
@@ -222,6 +224,7 @@
 			isa = PBXGroup;
 			children = (
 				B32D9EB552F7EE42930F5620 /* DownloadManager.swift */,
+				A680A02D72D249C3A8F30926 /* ReadingImageLoader.swift */,
 				D27F8ABB245769E2413AC25C /* OfflineLibraryDatabase.swift */,
 				45F219830171BEEC091B7627 /* ReadingHistoryStore.swift */,
 				64675E4E3DE30479CDCDA36E /* ReadingProgressStore.swift */,
@@ -402,6 +405,7 @@
 				92D9832DD93AF08286BEB63F /* CommentsView.swift in Sources */,
 				F24C8E41517AB76391CC3B3D /* DailyStatus.swift in Sources */,
 				62916BE77A7452182E72FA44 /* DownloadManager.swift in Sources */,
+				FCE032DEDC4E4A28A5B19031 /* ReadingImageLoader.swift in Sources */,
 				1BEBBCE10EB38A11F7ADFA47 /* DownloadsView.swift in Sources */,
 				96D3F4587460F5AEDAF70110 /* ExploreView.swift in Sources */,
 				1CB9975837C6678399A0DFDF /* FavoritePickerSheet.swift in Sources */,

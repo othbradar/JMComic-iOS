@@ -791,6 +791,7 @@ struct SettingsView: View {
     private var simultaneousComics = DownloadConcurrencyPreferences.defaultSimultaneousComics
     @AppStorage(DownloadConcurrencyPreferences.pageDownloadsPerComicKey)
     private var pageDownloadsPerComic = DownloadConcurrencyPreferences.defaultPageDownloadsPerComic
+    @AppStorage(PageImagePreferences.prefetchCountKey) private var prefetchPages = PageImagePreferences.defaultPrefetchCount
     @AppStorage(PageImagePreferences.repairChromaKey) private var repairChroma = false
     @AppStorage(PageImagePreferences.storageKey) private var pageImageStorage = PageImageStorage.lossless.rawValue
 
@@ -972,6 +973,15 @@ struct SettingsView: View {
                 }
             }
 
+            Section("阅读预取") {
+                Stepper("前后各预取 \(prefetchPages) 页", value: $prefetchPages, in: PageImagePreferences.prefetchRange)
+                    .accessibilityIdentifier("settings.readerPrefetchPages")
+                if showsExplanatoryText {
+                    Text("页数决定当前页前后的预取范围（最多各 6 页），与网络并发数分别控制。当前可见页优先，远离当前范围或退出阅读时取消无用预取。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+
             Section("网络与下载并发") {
                 Stepper(
                     "缓存图片并发数：\(cachedImageRequests)",
@@ -1051,6 +1061,7 @@ struct SettingsView: View {
     }
 
     private func normalizeConcurrencySettings() {
+        prefetchPages = PageImagePreferences.boundedPrefetchCount(prefetchPages)
         cachedImageRequests = DownloadConcurrencyPreferences.bounded(cachedImageRequests)
         simultaneousComics = DownloadConcurrencyPreferences.bounded(simultaneousComics)
         pageDownloadsPerComic = DownloadConcurrencyPreferences.bounded(pageDownloadsPerComic)

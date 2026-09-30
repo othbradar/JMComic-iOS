@@ -71,7 +71,7 @@ enum JMCrypto {
 }
 
 enum ImageScrambler {
-    struct EncodedPage {
+    struct EncodedPage: Sendable {
         let data: Data
         let fileExtension: String
     }
