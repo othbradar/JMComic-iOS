@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E17B8B05FB864E65BFCFF658 /* LocalManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0273CF37C5764EBFBAB87FA9 /* LocalManagementView.swift */; };
+		C504F43CFF2744ED8534D086 /* OfflineExport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 533BD777B02940499443772D /* OfflineExport.swift */; };
+		BF11EFF631E74215A0403D34 /* LocalBackup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B618A5B43524AC8BF3B2C0F /* LocalBackup.swift */; };
+		8605D854218546079D4A138E /* AppLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = D413EB5CF3224441896738F4 /* AppLock.swift */; };
+		2A795F1FF29F4702895319C0 /* BlockedTagsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F666E630669C4C73820D2473 /* BlockedTagsStore.swift */; };
+		5F87D47895604901BFDAA8E9 /* StorageManagement.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F05341E03354741A94DFC28 /* StorageManagement.swift */; };
 		FCE032DEDC4E4A28A5B19031 /* ReadingImageLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A680A02D72D249C3A8F30926 /* ReadingImageLoader.swift */; };
 		08EE80C0ED5B2739E52B114D /* AppAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9B79129F6F2C41177223632 /* AppAppearance.swift */; };
 		0A60C4C33584C0BD6AC1B38E /* OfflineLibraryDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = D27F8ABB245769E2413AC25C /* OfflineLibraryDatabase.swift */; };
@@ -52,6 +58,12 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0273CF37C5764EBFBAB87FA9 /* LocalManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalManagementView.swift; sourceTree = "<group>"; };
+		533BD777B02940499443772D /* OfflineExport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineExport.swift; sourceTree = "<group>"; };
+		4B618A5B43524AC8BF3B2C0F /* LocalBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalBackup.swift; sourceTree = "<group>"; };
+		D413EB5CF3224441896738F4 /* AppLock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLock.swift; sourceTree = "<group>"; };
+		F666E630669C4C73820D2473 /* BlockedTagsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedTagsStore.swift; sourceTree = "<group>"; };
+		7F05341E03354741A94DFC28 /* StorageManagement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageManagement.swift; sourceTree = "<group>"; };
 		A680A02D72D249C3A8F30926 /* ReadingImageLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadingImageLoader.swift; sourceTree = "<group>"; };
 		0100821D62815085A0857E73 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		0102A9EB56FCCF052B4E13F6 /* ExploreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExploreView.swift; sourceTree = "<group>"; };
@@ -143,6 +155,11 @@
 		21E0CB7941200AEAC81F8D5C /* Components */ = {
 			isa = PBXGroup;
 			children = (
+
+
+
+
+
 				FE717FDF10C4D21B74253A7A /* ComicGrid.swift */,
 				CF5152E263F0055DE8F9E2E7 /* RemoteComicImage.swift */,
 			);
@@ -223,6 +240,11 @@
 		B60E37567B2DA7ADCE78C20F /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				533BD777B02940499443772D /* OfflineExport.swift */,
+				4B618A5B43524AC8BF3B2C0F /* LocalBackup.swift */,
+				D413EB5CF3224441896738F4 /* AppLock.swift */,
+				F666E630669C4C73820D2473 /* BlockedTagsStore.swift */,
+				7F05341E03354741A94DFC28 /* StorageManagement.swift */,
 				B32D9EB552F7EE42930F5620 /* DownloadManager.swift */,
 				A680A02D72D249C3A8F30926 /* ReadingImageLoader.swift */,
 				D27F8ABB245769E2413AC25C /* OfflineLibraryDatabase.swift */,
@@ -264,6 +286,8 @@
 		E9D10089822C2F1D30B47C15 /* Account */ = {
 			isa = PBXGroup;
 			children = (
+				0273CF37C5764EBFBAB87FA9 /* LocalManagementView.swift */,
+
 				F47476A133CAB990F1115876 /* AccountView.swift */,
 			);
 			path = Account;
@@ -396,6 +420,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E17B8B05FB864E65BFCFF658 /* LocalManagementView.swift in Sources */,
+				C504F43CFF2744ED8534D086 /* OfflineExport.swift in Sources */,
+				BF11EFF631E74215A0403D34 /* LocalBackup.swift in Sources */,
+				8605D854218546079D4A138E /* AppLock.swift in Sources */,
+				2A795F1FF29F4702895319C0 /* BlockedTagsStore.swift in Sources */,
+				5F87D47895604901BFDAA8E9 /* StorageManagement.swift in Sources */,
 				15F474D4F6ED5EA86E3182D6 /* APIClient.swift in Sources */,
 				EEC356798B1F8E04D1431D1B /* AccountView.swift in Sources */,
 				08EE80C0ED5B2739E52B114D /* AppAppearance.swift in Sources */,

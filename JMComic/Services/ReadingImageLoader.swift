@@ -78,6 +78,8 @@ final class ReadingImageMemory {
     private var cache: [String: Cached] = [:]
     private(set) var cacheBytes = 0
     private var clock: UInt64 = 0
+    private(set) var cacheGeneration = UUID()
+    func clearRebuildableImages() { cacheGeneration = UUID(); trimCache(to: 0) }
     private var buffered: [UUID: Int] = [:]
     private var active: [UUID: Int] = [:]
     private var waiters: [Waiter] = []
@@ -205,11 +207,12 @@ final class ReadingImageLoader {
     private struct Consumer { var visible: Bool; let prefetchOnly: Bool; let continuation: CheckedContinuation<UIImage, Error>; let metadata: Metadata }
     private final class Load {
         let id = UUID()
+        let cacheGeneration: UUID
         let urgency: PageLoadUrgency
         var consumers: [UUID: Consumer] = [:]
         var size: CGSize?
         var task: Task<Void, Never>?
-        init(visible: Bool) { urgency = PageLoadUrgency(visible: visible) }
+        init(visible: Bool, cacheGeneration: UUID) { self.cacheGeneration = cacheGeneration; urgency = PageLoadUrgency(visible: visible) }
     }
     private static let staging = AsyncPermitPool(limit: 3, reservedVisibleSlots: 1)
     private let namespace = UUID().uuidString + "|"
@@ -244,7 +247,7 @@ final class ReadingImageLoader {
                 let load: Load
                 let isNew: Bool
                 if let existing = loads[key] { load = existing; isNew = false }
-                else { load = Load(visible: visible); loads[key] = load; isNew = true }
+                else { load = Load(visible: visible, cacheGeneration: memory.cacheGeneration); loads[key] = load; isNew = true }
                 load.consumers[consumer] = Consumer(visible: visible, prefetchOnly: prefetchOnly, continuation: continuation, metadata: metadata)
                 if let size = load.size { metadata(size) }
                 updateUrgency(load)
@@ -294,7 +297,7 @@ final class ReadingImageLoader {
     private func finish(key: String, id: UUID, result: Result<UIImage, Error>) {
         guard let load = loads[key], load.id == id else { return }
         loads[key] = nil
-        if case .success(let image) = result { memory.insert(image, key: namespace + key) }
+        if case .success(let image) = result, load.cacheGeneration == memory.cacheGeneration { memory.insert(image, key: namespace + key) }
         for consumer in load.consumers.values { consumer.continuation.resume(with: result) }
     }
     private func release(key: String, consumer: UUID) {

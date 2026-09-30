@@ -22,6 +22,8 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.books</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>使用面容 ID 验证身份并解锁 JMComic。</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>

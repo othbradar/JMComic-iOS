@@ -4817,3 +4817,383 @@ extension JMComicTests {
         XCTAssertEqual(memory.bufferedBytes, 0)
     }
 }
+
+// Local-management fixtures contain only generated patterns and invented metadata.
+@MainActor
+private final class ManagementAuthentication: OwnerAuthenticating {
+    var pending: [CheckedContinuation<Void, Error>] = []
+    var calls = 0
+    var invalidations = 0
+    func authenticate(reason: String) async throws {
+        calls += 1
+        try await withCheckedThrowingContinuation { pending.append($0) }
+    }
+    func invalidate() { invalidations += 1 }
+    func finish(_ result: Result<Void, Error>) { pending.removeFirst().resume(with: result) }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testManagementTagPersistenceAndBoundedEmptyPagination() async throws {
+        let suite = "ManagementTags.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = BlockedTagsStore(defaults: defaults)
+        store.add("  ＣＯＬＯＲ \n LINE "); store.add("color line")
+        XCTAssertEqual(BlockedTagsStore(defaults: defaults).tags, ["color line"])
+        XCTAssertFalse(store.allows(ComicSummary(id: "1", name: "Pattern", tags: ["Color   Line"])))
+        XCTAssertTrue(store.allows(ComicSummary(id: "2", name: "Untagged")))
+        var requests: [Int] = []
+        let batch = try await FilteredPageBatch.load(start: 1, existing: [], blocked: Set(store.tags)) { page in
+            requests.append(page)
+            return (100, [ComicSummary(id: "\(page)", name: "Pattern", tags: ["color line"])])
+        }
+        XCTAssertEqual(requests, [1, 2, 3]); XCTAssertEqual(batch.nextPage, 4); XCTAssertTrue(batch.hasMore)
+        let next = try await FilteredPageBatch.load(start: batch.nextPage, existing: Set(batch.comics.map(\.id)), blocked: Set(store.tags)) { _ in
+            (100, [ComicSummary(id: "2", name: "Duplicate")])
+        }
+        XCTAssertFalse(next.hasMore); XCTAssertTrue(next.comics.isEmpty)
+        store.remove("color line"); XCTAssertTrue(BlockedTagsStore(defaults: defaults).tags.isEmpty)
+    }
+
+    @MainActor
+    func testManagementLockCancelFailureSuccessAndOwnLifecycle() async throws {
+        let suite = "ManagementLock.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let auth = ManagementAuthentication(), session = AppLockSession(defaults: defaults, auth: auth)
+        session.active()
+        let enable = Task { await session.setEnabled(true) }
+        try await eventually { auth.calls == 1 }
+        auth.finish(.failure(CancellationError())); await enable.value
+        XCTAssertFalse(session.state.enabled)
+        let retry = Task { await session.setEnabled(true) }
+        try await eventually { auth.calls == 2 }
+        auth.finish(.success(())); await retry.value
+        XCTAssertTrue(session.state.enabled); XCTAssertFalse(session.state.locked)
+        session.inactive(); session.active()
+        XCTAssertFalse(session.state.locked); XCTAssertEqual(auth.calls, 2)
+        session.background(); session.active()
+        try await eventually { auth.calls == 3 }
+        session.inactive(); session.active() // the system authentication prompt
+        XCTAssertEqual(auth.calls, 3)
+        auth.finish(.failure(CocoaError(.userCancelled)))
+        try await eventually { !session.authenticating }
+        XCTAssertTrue(session.state.locked)
+        session.inactive(); session.active(); XCTAssertEqual(auth.calls, 3)
+        let unlock = Task { await session.unlock() }
+        try await eventually { auth.calls == 4 }
+        auth.finish(.success(())); await unlock.value
+        XCTAssertFalse(session.state.locked)
+    }
+
+    @MainActor
+    func testManagementLockRejectsStaleAuthenticationAcrossBackground() async throws {
+        let suite = "ManagementLockGeneration.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: AppLockSession.key)
+        let auth = ManagementAuthentication(), session = AppLockSession(defaults: defaults, auth: auth)
+        session.active(); try await eventually { auth.calls == 1 }
+        session.background(); session.active(); try await eventually { auth.calls == 2 }
+        auth.finish(.success(())) // old auth cannot unlock new generation
+        await Task.yield(); XCTAssertTrue(session.state.locked)
+        auth.finish(.failure(CancellationError()))
+        try await eventually { !session.authenticating }
+        XCTAssertTrue(session.state.locked)
+    }
+
+    @MainActor
+    func testManagementCacheClearRetainsLocalPagesAndChapterProgress() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = try imageFromRGBX(colourDetailPage(width: 17, height: 257), width: 17, height: 257)
+        let url = root.appendingPathComponent("page.png"), bytes = try XCTUnwrap(image.pngData())
+        try bytes.write(to: url)
+        let suite = "ManagementCache.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let progress = ReadingProgressStore(defaults: defaults)
+        await progress.merge(["book": ["chapter": ReadingProgress(chapterID: "chapter", pageIndex: 4, updatedAt: .now)]])
+        let api = APIClient(secureStore: PageFixtureSecureStore(), requiresBootstrap: false)
+        let first = try await LocalPageImages.shared.image(url: url)
+        await api.clearRebuildableImageCaches()
+        let second = try await LocalPageImages.shared.image(url: url)
+        XCTAssertEqual(first.size, second.size)
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        XCTAssertEqual(ReadingProgressStore(defaults: defaults).progress(comicID: "book", chapterID: "chapter")?.pageIndex, 4)
+    }
+
+    func testManagementHTTPGenerationRejectsOldWrites() throws {
+        let cache = RebuildableURLCache(memoryCapacity: 1_000_000, diskCapacity: 0, directory: nil)
+        let request = URLRequest(url: URL(string: "https://cache-fixture.invalid/image")!)
+        let old = cache.request(request)
+        let response = CachedURLResponse(response: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Cache-Control": "max-age=3600"])!, data: Data([1, 2, 3]))
+        cache.storeCachedResponse(response, for: old)
+        XCTAssertNotNil(cache.cachedResponse(for: old))
+        cache.clearGeneration()
+        cache.storeCachedResponse(response, for: old)
+        XCTAssertNil(cache.cachedResponse(for: old))
+        let current = cache.request(request)
+        cache.storeCachedResponse(response, for: current)
+        XCTAssertNotNil(cache.cachedResponse(for: current))
+    }
+
+    func testManagementStorageInventoryDeduplicatesAndPreservesDirectories() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let download = JMComicStorageLayout.downloadRoot(documentsRoot: root), covers = JMComicStorageLayout.cacheRoot(documentsRoot: root)
+        try FileManager.default.createDirectory(at: download, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: covers, withIntermediateDirectories: true)
+        let file = download.appendingPathComponent("synthetic.bin")
+        try Data(repeating: 1, count: 100).write(to: file)
+        try FileManager.default.linkItem(at: file, to: covers.appendingPathComponent("shared.bin"))
+        try FileManager.default.createSymbolicLink(at: covers.appendingPathComponent("link"), withDestinationURL: download)
+        let inventory = StorageInventory()
+        let usage = try await inventory.usage(documents: root, exports: root.appendingPathComponent("exports"))
+        XCTAssertEqual(usage.downloads, 100); XCTAssertEqual(usage.protectedFiles, 0)
+        try Data(repeating: 2, count: 200).write(to: download.appendingPathComponent("later.bin"))
+        let cached = try await inventory.usage(documents: root, exports: root.appendingPathComponent("exports"))
+        XCTAssertEqual(cached.downloads, 100)
+        let fresh = try await inventory.usage(documents: root, exports: root.appendingPathComponent("exports"), force: true)
+        XCTAssertEqual(fresh.downloads, 300)
+    }
+
+    @MainActor
+    func testManagementBackupRoundtripMergesChaptersAndNeverCreatesDownloads() async throws {
+        let suite = "ManagementBackup.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try OfflineLibraryDatabase(databaseURL: root.appendingPathComponent("db.sqlite"))
+        let progress = ReadingProgressStore(defaults: defaults), blocked = BlockedTagsStore(defaults: defaults)
+        let old = Date().addingTimeInterval(-100), new = Date().addingTimeInterval(-10)
+        await progress.merge(["b": ["c1": ReadingProgress(chapterID: "c1", pageIndex: 9, updatedAt: new)]])
+        defaults.set("dark", forKey: "jm.appearance.color-mode")
+        blocked.add("existing")
+        let coordinator = BackupCoordinator(defaults: defaults, receiptURL: root.appendingPathComponent("receipt.json"))
+        let book = BackupBook(OfflineComic(comic: ComicSummary(id: "b", name: "Synthetic"), chapters: [OfflineChapter(id: "c2", title: "Chapter", relativePagePaths: ["/old/device/page.jpg"], expectedPageCount: 1)]))
+        let backup = LocalBackup(progress: ["b": ["c1": ReadingProgress(chapterID: "c1", pageIndex: 1, updatedAt: old), "c2": ReadingProgress(chapterID: "c2", pageIndex: 3, updatedAt: new)]], settings: ["jm.appearance.color-mode": .text("light"), PageImagePreferences.prefetchCountKey: .integer(4)], blockedTags: [" NEW "], books: [book])
+        let file = root.appendingPathComponent("backup.json")
+        let data = try JSONEncoder().encode(backup); try data.write(to: file)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("/old/device"))
+        try await coordinator.merge(LocalBackup.read(file), progress: progress, blocked: blocked)
+        let loaded = ReadingProgressStore(defaults: defaults)
+        XCTAssertEqual(loaded.progress(comicID: "b", chapterID: "c1")?.pageIndex, 9)
+        XCTAssertEqual(loaded.progress(comicID: "b", chapterID: "c2")?.pageIndex, 3)
+        XCTAssertEqual(defaults.string(forKey: "jm.appearance.color-mode"), "dark")
+        XCTAssertEqual(defaults.integer(forKey: PageImagePreferences.prefetchCountKey), 4)
+        XCTAssertEqual(blocked.tags, ["existing", "new"])
+        XCTAssertNil(defaults.object(forKey: AppLockSession.key))
+        XCTAssertTrue(try db.loadLibrary().isEmpty); XCTAssertEqual(coordinator.restoredBooks.count, 1)
+        let replay = BackupCoordinator(defaults: defaults, receiptURL: root.appendingPathComponent("receipt.json"))
+        try await replay.recover(progress: loaded, blocked: blocked)
+        XCTAssertEqual(replay.restoredBooks, coordinator.restoredBooks)
+    }
+
+    @MainActor
+    func testManagementBackupRejectsBadFilesAndWriteFailureWithoutMutation() async throws {
+        let suite = "ManagementBadBackup.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let progress = ReadingProgressStore(defaults: defaults), blocked = BlockedTagsStore(defaults: defaults)
+        let file = root.appendingPathComponent("not-a-directory")
+        try Data("bad".utf8).write(to: file)
+        XCTAssertThrowsError(try LocalBackup.read(file))
+        var backup = LocalBackup(progress: [:], settings: [:], blockedTags: [], books: [])
+        backup.schemaVersion = 99; XCTAssertThrowsError(try backup.validate())
+        backup.schemaVersion = 1; backup.settings[AppLockSession.key] = .bool(true)
+        XCTAssertThrowsError(try backup.validate())
+        backup.settings = ["token": .text("invented")]; XCTAssertThrowsError(try backup.validate())
+        backup.settings = [PageImagePreferences.prefetchCountKey: .text("4")]; XCTAssertThrowsError(try backup.validate())
+        backup.settings = [:]; backup.blockedTags = Array(repeating: "too many", count: 201)
+        XCTAssertThrowsError(try backup.validate())
+        backup.blockedTags = ["incoming"]
+        let coordinator = BackupCoordinator(defaults: defaults, receiptURL: file.appendingPathComponent("receipt.json"))
+        let before = (defaults.persistentDomain(forName: suite) ?? [:]) as NSDictionary
+        do { try await coordinator.merge(backup, progress: progress, blocked: blocked); XCTFail("write must fail") } catch {}
+        XCTAssertEqual((defaults.persistentDomain(forName: suite) ?? [:]) as NSDictionary, before)
+        XCTAssertTrue(progress.chapters.isEmpty); XCTAssertTrue(blocked.tags.isEmpty)
+        XCTAssertTrue(coordinator.restoredBooks.isEmpty)
+        let huge = root.appendingPathComponent("oversized.json")
+        try Data(repeating: 32, count: LocalBackup.maximumBytes + 1).write(to: huge)
+        XCTAssertThrowsError(try LocalBackup.read(huge))
+    }
+
+    @MainActor
+    func testManagementLegacyProgressMigrationRetainsEveryNewChapter() async throws {
+        let suite = "ManagementProgress.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = ReadingProgress(chapterID: "old", pageIndex: 5, updatedAt: Date().addingTimeInterval(-30))
+        defaults.set(try JSONEncoder().encode(["book": original]), forKey: "jm.reading.progress")
+        let store = ReadingProgressStore(defaults: defaults)
+        XCTAssertEqual(store.progress(comicID: "book", chapterID: "old"), original)
+        store.update(comicID: "book", chapterID: "new", pageIndex: 8)
+        await store.merge([:])
+        let loaded = ReadingProgressStore(defaults: defaults)
+        XCTAssertEqual(loaded.progress(comicID: "book", chapterID: "old"), original)
+        XCTAssertEqual(loaded.progress(comicID: "book", chapterID: "new")?.pageIndex, 8)
+    }
+
+    func testManagementExportPreservesFormatBytesOrderAndDetectsMissingFiles() throws {
+        // Leave only this generated fixture for independent host ZIP extraction.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("JMComic-ManagementVerification")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let db = try OfflineLibraryDatabase(databaseURL: root.appendingPathComponent("fixture.sqlite"))
+        let comic = ComicSummary(id: "fixture", name: "../Synthetic: Book")
+        try db.upsertComic(comic, storageDirectoryName: "fixture")
+        let image = try imageFromRGBX(colourDetailPage(width: 31, height: 173), width: 31, height: 173)
+        let png = try XCTUnwrap(image.pngData()), jpg = try XCTUnwrap(image.jpegData(compressionQuality: 0.96))
+        for (i, id) in ["later", "earlier"].enumerated() {
+            try db.upsertChapter(comicID: comic.id, chapter: Chapter(id: id, title: "../同名:章节", sort: i == 0 ? 2 : 1), expectedPageCount: 2)
+            for page in 0..<2 {
+                let name = "\(id)-\(page)." + (page == 0 ? "png" : "jpg")
+                try (page == 0 ? png : jpg).write(to: root.appendingPathComponent(name), options: .atomic)
+                try db.upsertPage(chapterID: id, pageIndex: page, globalOrdinal: i * 2 + page + 1, relativePath: name)
+            }
+        }
+        let book = try XCTUnwrap(db.loadLibrary().first)
+        let plan = try OfflineExportPlan.make(comic: book, records: db.allPageRecords(comicID: comic.id), root: root, chapterID: nil)
+        XCTAssertEqual(plan.pages.count, 4); XCTAssertEqual(plan.missing, 0)
+        XCTAssertEqual(plan.pages.first?.source.lastPathComponent, "earlier-0.png")
+        XCTAssertEqual(Set(plan.pages.map(\.name)).count, 4)
+        XCTAssertTrue(plan.pages.allSatisfy { !$0.name.hasPrefix("/") && !$0.name.components(separatedBy: "/").contains("..") && $0.size == CGSize(width: 31, height: 173) })
+        let output = root.appendingPathComponent("export.cbz")
+        XCTAssertThrowsError(try CBZWriter.write(plan, to: output, allowPartial: false))
+        try CBZWriter.write(plan, to: output, allowPartial: true)
+        let expected = plan.pages.map { ["name": $0.name, "source": $0.source.lastPathComponent] }
+        try JSONSerialization.data(withJSONObject: expected).write(to: root.appendingPathComponent("expected.json"))
+        print("SYNTHETIC_EXPORT_FIXTURE=\(root.path)")
+        let completeChapter = try OfflineExportPlan.make(comic: book, records: db.allPageRecords(comicID: comic.id), root: root, chapterID: "earlier")
+        XCTAssertFalse(completeChapter.requiresPartialConsent)
+        try FileManager.default.removeItem(at: plan.pages[0].source)
+        XCTAssertThrowsError(try CBZWriter.write(completeChapter, to: root.appendingPathComponent("changed.cbz"), allowPartial: false))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("changed.cbz").path))
+        let missing = try OfflineExportPlan.make(comic: book, records: db.allPageRecords(comicID: comic.id), root: root, chapterID: "earlier")
+        XCTAssertEqual(missing.missing, 1); XCTAssertEqual(missing.pages.count, 1)
+        XCTAssertThrowsError(try CBZWriter.write(missing, to: root.appendingPathComponent("missing.cbz"), allowPartial: false))
+        try CBZWriter.write(missing, to: root.appendingPathComponent("partial.cbz"), allowPartial: true)
+        try png.write(to: plan.pages[0].source) // restore expected fixture for independent comparison
+    }
+
+    func testManagementExportCancellationRemovesUnfinishedArchive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("fixture.png"), output = root.appendingPathComponent("cancel.cbz")
+        let image = try imageFromRGBX(colourDetailPage(width: 32, height: 2000), width: 32, height: 2000)
+        try XCTUnwrap(image.pngData()).write(to: source)
+        let version = try LocalPageVersion.read(source)
+        let page = OfflineExportPage(source: source, name: "0001/000001.png", version: version, size: image.size)
+        let plan = OfflineExportPlan(filename: "cancel.cbz", pages: Array(repeating: page, count: 100), missing: 0, localBookOnly: false)
+        let task = Task.detached {
+            try CBZWriter.write(plan, to: output, allowPartial: false) { done, _ in
+                if done == 1 { withUnsafeCurrentTask { $0?.cancel() } }
+            }
+        }
+        do { try await task.value; XCTFail("must cancel") } catch is CancellationError {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    }
+
+    func testManagementExportLeaseProtectsSharingAndCleansExpiredFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let leases = ExportFiles(root: root), now = Date()
+        let (id, directory) = try await leases.begin()
+        try Data([1]).write(to: directory.appendingPathComponent("synthetic.cbz"))
+        try await leases.cleanup(now: now.addingTimeInterval(100_000))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+        try await leases.finishSharing(id, now: now)
+        try await leases.cleanup(now: now.addingTimeInterval(599))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.path))
+        try await leases.cleanup(now: now.addingTimeInterval(601))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        let (cancel, abandoned) = try await leases.begin()
+        try await leases.discard(cancel)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: abandoned.path))
+        let (_, orphan) = try await leases.begin()
+        let restarted = ExportFiles(root: root)
+        try await restarted.cleanup(now: now.addingTimeInterval(100_000))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    @MainActor
+    func testManagementSharePresentationAndPrivacyCoverOnDevice() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("synthetic.json")
+        try Data("{}".utf8).write(to: url)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene), host = UIViewController()
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        let controller = FileShareSheet.controller(item: ManagedShare(id: UUID(), url: url), sourceView: host.view, onFinish: {})
+        host.view.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(100))
+        host.present(controller, animated: false)
+        try await Task.sleep(for: .milliseconds(800))
+        print("SHARE_PRESENTATION host=\(String(describing: host.presentedViewController)) presenter=\(String(describing: controller.presentingViewController)) window=\(controller.view.window != nil)")
+        XCTAssertTrue(controller.view.window != nil)
+        if UIDevice.current.userInterfaceIdiom == .pad { XCTAssertNotNil(controller.popoverPresentationController?.sourceView) }
+        let suite = "ManagementPrivacy.\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = AppLockSession(defaults: defaults, auth: ManagementAuthentication())
+        let marker = AppPrivacyBridge.Marker(); marker.session = session; host.view.addSubview(marker)
+        session.inactive(); marker.updateCover()
+        XCTAssertTrue(scene.windows.contains { $0.windowLevel > .alert && !$0.isHidden })
+        session.active(); marker.updateCover()
+        marker.tearDown(); controller.dismiss(animated: false)
+    }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testManagementClearDuringLoadDoesNotCacheLateResult() async throws {
+        let memory = ReadingImageMemory()
+        // Use a dedicated memory so this test never clears another reader.
+        let isolated = ReadingImageLoader(memory: memory)
+        let data = try XCTUnwrap(imageFromRGBX(colourDetailPage(width: 25, height: 51), width: 25, height: 51).pngData())
+        var pending: CheckedContinuation<Data, Error>?, starts = 0
+        let source: @MainActor (PageLoadUrgency, @escaping ReadingImageLoader.Metadata) async throws -> Data = { _, _ in
+            starts += 1
+            if starts == 1 { return try await withCheckedThrowingContinuation { pending = $0 } }
+            return data
+        }
+        let current = Task { try await isolated.image(key: "fixture", source: source, decode: { try ImageScrambler.rasterImage(from: $0) }) }
+        try await eventually { pending != nil }
+        memory.clearRebuildableImages()
+        pending?.resume(returning: data)
+        let visible = try await current.value
+        XCTAssertEqual(visible.size, CGSize(width: 25, height: 51))
+        _ = try await isolated.image(key: "fixture", source: source, decode: { try ImageScrambler.rasterImage(from: $0) })
+        XCTAssertEqual(starts, 2)
+    }
+}
+
+extension JMComicTests {
+    @MainActor
+    func testManagementShareWrapperPresentsOnIPad() async throws {
+        let (id, directory) = try await ExportFiles.shared.begin()
+        let url = directory.appendingPathComponent("synthetic.json")
+        try Data("{}".utf8).write(to: url)
+        let item = ManagedShare(id: id, url: url)
+        var finished = false
+        let presenter = FileShareSheet.Presenter(item: item, onFinish: { finished = true })
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKey = scene.keyWindow
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = presenter; window.makeKeyAndVisible()
+        defer { window.isHidden = true; previousKey?.makeKey() }
+        try await Task.sleep(for: .milliseconds(1000))
+        let activity = try XCTUnwrap(presenter.presentedViewController as? UIActivityViewController)
+        XCTAssertNotNil(activity.view.window)
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(activity.popoverPresentationController?.sourceView === presenter.view)
+        }
+        activity.completionWithItemsHandler?(nil, false, nil, nil)
+        XCTAssertTrue(finished)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        presenter.dismiss(animated: false)
+        try await ExportFiles.shared.discard(id)
+    }
+}

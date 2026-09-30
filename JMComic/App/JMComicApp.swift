@@ -10,7 +10,7 @@ struct JMComicApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
+            ProtectedAppRoot()
                 .environmentObject(api)
                 .environmentObject(downloads)
                 .environmentObject(readingProgress)
@@ -18,6 +18,9 @@ struct JMComicApp: App {
                 .environmentObject(appearance)
                 .preferredColorScheme(appearance.preferredColorScheme)
                 .task {
+                    try? await ExportFiles.shared.cleanup()
+                    await BackupCoordinator.shared.recoverOnLaunch(progress: readingProgress, blocked: .shared)
+                    appearance.reloadFromDefaults()
                     await api.bootstrap()
                     await api.autoSignIfEnabled()
                 }

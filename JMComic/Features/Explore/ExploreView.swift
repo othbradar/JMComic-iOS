@@ -79,6 +79,7 @@ private final class ExploreViewModel: ObservableObject {
 struct ExploreView: View {
     @EnvironmentObject private var api: APIClient
     @StateObject private var model = ExploreViewModel()
+    @ObservedObject private var blocked = BlockedTagsStore.shared
 
     var body: some View {
         Group {
@@ -110,21 +111,22 @@ struct ExploreView: View {
 
             ScrollView {
                 if let section = model.selectedSection {
+                    let visible = section.comics.filter(blocked.allows)
                     VStack(alignment: .leading, spacing: 14) {
                         HStack(alignment: .firstTextBaseline) {
                             Text(section.title)
                                 .font(.title2.bold())
                             Spacer(minLength: 12)
-                            Text("\(section.comics.count) 部")
+                            Text("\(visible.count) 部已载入")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
-                        if section.comics.isEmpty {
-                            ContentUnavailableView("该栏目暂无漫画", systemImage: "books.vertical")
+                        if visible.isEmpty {
+                            ContentUnavailableView("该栏目暂无可显示漫画", systemImage: "books.vertical", description: Text(blocked.tags.isEmpty ? "下拉可刷新" : "已按返回的标签过滤；缺少标签的条目无法判断。下拉可刷新。"))
                                 .frame(maxWidth: .infinity)
                                 .padding(.top, 40)
                         } else {
-                            ComicGrid(comics: section.comics)
+                            ComicGrid(comics: visible)
                         }
                     }
                     .padding()

@@ -180,3 +180,51 @@ xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobil
 ### 本批提交授权
 
 - 用户确认“那就提交”。提交前再次核对 HEAD、工作区、暂存区和已完成的构建/测试/安装日志；暂存区原为空，范围仅为本批 11 个文件。沿用上述验证，此次未重复构建或运行测试；只作本地提交，不推送。
+
+## 2026-09-30：本地管理、隐私与轻量备份 / CBZ
+
+- 基线 `a0de9b71e4cdbf9a0adca500ae8d4d6ac683f215`，`codex/root-tab-resident-pages-v6`；开始时工作区干净。已核对 `git status --short --branch`、`git rev-parse HEAD`、README、CONTRIBUTING、project.yml、`xcodebuild -list -project JMComic.xcodeproj`、`xcrun simctl list devices booted` 和实际调用链。没有 pull、切分支、reset、卸载或清数据。真实入口仍为 RootView，新保护层保持其身份和导航结构。
+- 真实存储边界：Documents/download 为原图，Documents/cache 为下载/收藏/历史共享持久封面，Documents/database 为必要索引；这三类不由“清理缓存”删除。后台空间统计合并进行中计算、缓存 30 秒，按设备/inode 去重并跳过符号链接；单独列出下载、必要索引/封面、HTTP 缓存和实际导出临时目录。默认清理只走 URLCache API 与有界内存图片缓存；活跃读者继续使用当前结果，清理前请求不能重新登记旧缓存。下载删除复用原串行提交队列与 tombstone，并单独确认。
+- 标签：仅使用 API 模型实际携带的 tags；未发现可靠服务端排除参数，不逐条获取详情。兼容 Unicode、空白、大小写的完整标签匹配，最多 200 条；设置可新增/移除并持久化，覆盖发现/最新、相关推荐与搜索，收藏/历史/下载保持可见。缺标签条目保留并明确说明覆盖限制。搜索一次主动操作最多补 3 页，支持继续追加、原始重复页/空页终止；过滤后显示已载入数量，不伪报精确总数。发现原本无追加分页，保留现有刷新方式。
+- 应用锁：默认关闭，启停均先调用 LocalAuthentication 的 deviceOwnerAuthentication，可由系统选择生物识别或设备密码。失败/取消保持原锁态，可重试；只有 background 更新认证代次并重新锁定，普通 inactive 仅遮挡。窗口内独立高层 UIWindow 覆盖根页、阅读器和 sheet，旧回调不能解锁新代次，无静态跨窗口引用；设置变更通知其他场景。应用切换器始终遮挡，不宣称数据库/图片加密，不退出登录或删下载。
+- 备份：schemaVersion=1 的 JSON，12 MiB、5,000 本书、50,000 章进度/书目章节及字段类型/时间/数量限制，白名单导出非敏感设置。明确不含认证信息、Cookie、Token、Keychain、权限、应用锁状态、图片或原设备文件路径。导入先预检展示，再安全合并：章节进度取较新时间；无可靠更新时间的现有设置优先；标签与书目合并保留现有内容。先原子发布可重放导入记录，发布失败不改变状态，崩溃后幂等恢复；不向下载表导入“完成”记录。恢复书目单独标明“资料，不代表已下载”，不自动下载。进度在保留旧最近章节接口及 300 ms 合并写入的基础上增加各章存储，旧数据可读。
+- 导出：当前仓库没有用户所述的既有完整图片分享入口，因此补充复用的系统文件分享宿主。下载书籍菜单、离线章节上下文菜单和章节列表工具栏接入 CBZ。后台预检文件版本、实际格式与头尺寸；按章节 sort/id、补零页序和安全名称组织，同名章增加稳定后缀。ZIP STORE 以 64 KiB 块复制现有 PNG/JPEG 等原字节，无联网/重编码；经典 ZIP 上限约 4 GiB、50,000 页，超过时明确失败。预检与写入可取消，源文件变化使整次导出失败并移除半成品，进度通知有界。分享期间租约保护文件，完成/关闭后保留 10 分钟再清理，进程中断残留按 24 小时过期清理。
+- 完整范围限制：旧下载索引未保存完整服务端章节目录；“导出本地全部章节”明确提示无法保证网站整本齐全，需同意本地范围，文件名前缀“部分-”。单章所有预期页存在时可完整导出；缺页必须另行同意部分导出。旧 JPEG 保留现有质量，不称为无损原图。
+
+### 验证与实际命令
+
+- 20 项不同的定向 XCTest 最终通过（新增 15、复用 5）：清理期间旧请求/图片缓存代次、清理后本地图片与进度、硬链接去重与统计限频、标签持久化与最多 3 页、认证启用取消/成功/失败/自身 inactive/旧回调、旧进度迁移与各章合并、备份白名单/类型/版本/大小/数量/写入失败/无图片元数据、导出顺序/格式/缺页/取消/替换/临时文件租约，以及既有共享加载、文件替换、删除后重下载和旧 JPEG。夹具仅使用生成图案、虚构书目、独立 UserDefaults suite 与临时 SQLite。
+- `Artifacts/local-management/tests-iphone.log`：13 项通过；`regression-iphone.log`：8 项通过（3 项本批、5 项既有）；`ipad-share-fixed.log`、`ipad-wrapper.log`：各 1 项通过，含真实 iPad 系统分享呈现、宿主锚点、取消回调后文件保留及高层遮挡窗口。没有跑全量测试或 Instruments。
+- 调试过程如实记录：最初新增文件误入测试 target / Components group，修正 Xcode 工程后构建成功；最初 only-testing 使用不支持的前缀选择，实际 0 项，未算验证。随后 13 项首轮有 3 个夹具失败（比较包含系统全局域的 UserDefaults、页全局编号从 0 起、分享宿主尚未挂窗），修正后通过。iPad 分享实际发现自身视图作为 popover 锚点导致布局循环，已改为独立宿主锚点；失败日志 `tests-ipad.log` 保留，修复及真实宿主复测通过。
+- 定向测试命令采用 `xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug -sdk iphonesimulator -destination 'id=<上述模拟器 UUID>' -derivedDataPath Artifacts/local-management/DerivedData -parallel-testing-enabled NO -only-testing:JMComicTests/JMComicTests/<具体方法> test`。每份日志开头有完整实际参数；初始 13 项与补测的精确参数另存 `test-command.txt`、`regression-command.txt`、`ipad-command.txt`，iPad 修复/宿主测试使用各自同名方法。
+- 独立导出核对：对测试打印的 `SYNTHETIC_EXPORT_FIXTURE` 目录，使用 Python `zipfile.ZipFile.testzip()/namelist()/read()` 解包，逐项与源文件字节比较，再用 `sips -g pixelWidth -g pixelHeight` 检查尺寸及 PNG/JPEG 魔数。4 页 / 2 章顺序、CRC、原始字节及 31×173 尺寸均一致；部分包仅 1 页。结果 `Artifacts/local-management/zip-verification.json`。未导出真实阅读内容作为夹具或报告附件。
+
+最终完整 App 构建和覆盖安装均成功（Xcode 26.6 / iOS 26.5 Simulator）：
+
+```sh
+xcodebuild -project JMComic.xcodeproj -scheme JMComic -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' -derivedDataPath build/local-management-app \
+  CODE_SIGNING_ALLOWED=NO build > Artifacts/local-management/complete-app-build.log 2>&1
+xcrun simctl terminate 88E155ED-2CC4-4266-8137-148FD7FBB757 io.github.jmcomic.mobile
+xcrun simctl install 88E155ED-2CC4-4266-8137-148FD7FBB757 /Users/othbradar/PycharmProjects/JMComic-iOS/build/local-management-app/Build/Products/Debug-iphonesimulator/JMComic.app
+xcrun simctl launch 88E155ED-2CC4-4266-8137-148FD7FBB757 io.github.jmcomic.mobile
+xcrun simctl terminate 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobile
+xcrun simctl install 467D92A6-2187-48A6-BF24-9824B48313B1 /Users/othbradar/PycharmProjects/JMComic-iOS/build/local-management-app/Build/Products/Debug-iphonesimulator/JMComic.app
+xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobile
+```
+
+- iPhone 17 Pro Max `88E155ED-2CC4-4266-8137-148FD7FBB757`；iPad Pro 11-inch (M5) `467D92A6-2187-48A6-BF24-9824B48313B1`。完整产物路径如上，bundle ID 保持 `io.github.jmcomic.mobile`；这是 Simulator `.app`，不是 IPA。没有改签名/发布配置或上传。
+- `final-install.log` 保存上述命令、两端 `simctl get_app_container … data/app` 和主程序/debug dylib SHA-256 比对结果，均与最终产物相同。数据容器路径 UUID 有变化，不能称“容器未变”；iPad 原 25 个下载文件、12,347,673 字节及相对路径/大小摘要一致，iPhone 原无下载仍无下载。清缓存后也未改变这些文件。`final-install-checks.json` 为汇总。没有卸载、清空账号/进度或下载。
+- CUA smoke：两端最终完整 App 启动、发现内容加载；iPad 原登录状态保留；设置分类统计与清理按钮可用（下载 12.3 MB 保留），合成屏蔽标签添加→返回重入仍在→移除恢复原值；清理后进入离线连续阅读，控制栏显示恢复到 12/25。下载菜单导出预检实际识别 25 页、缺失 0 页，未同意本地范围时按钮禁用。备份入口、系统文件选择器打开及 Escape 取消已验证。iPad 应用切换器卡片实际仅显示锁图标/JMComic 遮挡页。
+
+### 待人工检查 / 未执行
+
+- LocalAuthentication 在 iPad Simulator 可弹出系统设备密码页面；未输入/设置任何密码，其取消操作未被 CUA 可靠驱动，使用 `simctl terminate` / `launch` 原 bundle 返回，启用状态保持关闭。成功/失败/取消/旧回调已通过可控认证替身验证，真实 Face ID / Touch ID / 设备密码成功与回退、实际锁定后跨应用/深链、多窗口、权限弹窗需真机人工验证，未冒充系统认证通过。
+- iPhone 底部 Tab 的 AX 不暴露子按钮，坐标点击未可靠生效，iPhone 新设置细节 UI smoke 未执行完成。系统文件提供者上的完整导入/分享保存流程、实际大书导出中取消、旋转/分屏下分享仍需人工检查；导入合并/坏文件/取消/文件正确性已按上述合成回归验证。没有上传或发送文件给第三方。
+- 真机帧率、峰值内存、触控手感未执行；没有性能提升百分比或“满帧”声明。`git diff --check` 通过。本批未暂存、未提交、未推送，等待完整 App 人工检查。
+
+
+### 本批提交与 1.0.2 发布授权
+
+- 用户确认本批并明确授权提交、推送、构建 1.0.2 IPA 和发布更新说明。提交前再次核对工作区、暂存区、远端 refs 及现有发布方式；只有本批文件，未暂存其他改动。沿用上文 20 项定向回归和完整 App 验证，本次提交阶段未重复运行测试。
+- 远端 main 位于 `5aa3a29`（v1.0.1），是当前分支祖先；采用快进推送，不切换/重置本地分支。现有发布为 iOS 18+、arm64 未签名 IPA，继续此方式，不使用个人证书或 Provisioning Profile。新版本计划为 1.0.2 / build 23。

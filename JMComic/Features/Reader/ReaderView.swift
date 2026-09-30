@@ -358,7 +358,7 @@ struct ReaderView: View {
     }
 
     private func restoredPageIndex() -> Int {
-        guard let saved = progressStore.progress(comicID: comic.id),
+        guard let saved = progressStore.progress(comicID: comic.id, chapterID: chapter.id),
               saved.chapterID == chapter.id else {
             return min(currentPage, max(0, pageCount - 1))
         }

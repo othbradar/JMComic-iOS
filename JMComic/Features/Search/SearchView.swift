@@ -36,49 +36,45 @@ private final class SearchViewModel: ObservableObject {
     @Published var comics: [ComicSummary] = []
     @Published var total = 0
     @Published var isLoading = false
+    @Published var hasMore = false
     @Published var error: String?
     @Published var order = "mr"
+    private var nextPage = 1
     private var requestGeneration = 0
+    private var activeQuery = ""
 
-    func search(_ text: String, api: APIClient) async {
+    func search(_ text: String, api: APIClient, append: Bool = false) async {
         let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
-            clearResults()
-            return
-        }
+        guard !query.isEmpty else { clearResults(); return }
+        if append && (isLoading || !hasMore || query != activeQuery) { return }
         requestGeneration &+= 1
         let generation = requestGeneration
-        isLoading = true
-        error = nil
-        defer {
-            if requestGeneration == generation { isLoading = false }
-        }
+        if !append { comics = []; nextPage = 1; activeQuery = query }
+        isLoading = true; error = nil
+        defer { if requestGeneration == generation { isLoading = false } }
         do {
-            let result = try await api.search(query, order: order)
+            let batch = try await FilteredPageBatch.load(start: nextPage, existing: Set(comics.map(\.id)),
+                blocked: Set(BlockedTagsStore.shared.tags)) { page in
+                    try await api.search(query, page: page, order: self.order)
+                }
             guard requestGeneration == generation, !Task.isCancelled else { return }
-            total = result.0
-            comics = result.1
-            error = nil
-            if comics.isEmpty, let id = Int(query.filter(\.isNumber)), id > 0,
+            comics += batch.comics; total = batch.serverTotal
+            nextPage = batch.nextPage; hasMore = batch.hasMore
+            // Preserve the existing explicit JM-ID lookup, without issuing a
+            // detail request for each result to invent missing tag metadata.
+            if !append, comics.isEmpty, let id = Int(query.filter(\.isNumber)), id > 0,
                let detail = try? await api.comic(id: String(id)) {
                 guard requestGeneration == generation, !Task.isCancelled else { return }
-                comics = [detail.summaryModel]
-                total = 1
+                comics = [detail.summaryModel]; total = 1; hasMore = false
             }
-        } catch is CancellationError {
-            return
         } catch {
-            guard requestGeneration == generation else { return }
+            guard requestGeneration == generation, !APIClient.isCancellation(error) else { return }
             self.error = error.localizedDescription
         }
     }
-
     func clearResults() {
-        requestGeneration &+= 1
-        comics = []
-        total = 0
-        error = nil
-        isLoading = false
+        requestGeneration &+= 1; comics = []; total = 0; error = nil
+        isLoading = false; hasMore = false; nextPage = 1; activeQuery = ""
     }
 }
 
@@ -129,6 +125,8 @@ struct SearchView: View {
     @Environment(\.dismissSearch) private var dismissSearch
     @EnvironmentObject private var api: APIClient
     @StateObject private var model = SearchViewModel()
+    @ObservedObject private var blocked = BlockedTagsStore.shared
+    private var visibleComics: [ComicSummary] { model.comics.filter(blocked.allows) }
     @StateObject private var history = SearchHistoryViewModel()
     let initialQuery: String
     @State private var query: String
@@ -148,7 +146,7 @@ struct SearchView: View {
                 RetryView(title: "搜索失败", message: error) {
                     Task { await model.search(query, api: api) }
                 }
-            } else if model.comics.isEmpty {
+            } else if visibleComics.isEmpty {
                 if SearchHistoryNormalization.value(from: query) == nil,
                    !history.entries.isEmpty {
                     ScrollView {
@@ -175,17 +173,24 @@ struct SearchView: View {
                             ? "搜索漫画"
                             : "没有搜索结果",
                         systemImage: "books.vertical",
-                        description: Text("输入名称、作者、标签或 JM 号")
+                        description: Text(blocked.tags.isEmpty ? "输入名称、作者、标签或 JM 号" : "仅按接口已提供的标签过滤；缺少标签的条目无法判断。可继续载入下一批。")
                     )
                 }
             } else {
                 ScrollView {
-                    ComicGrid(comics: model.comics)
+                    ComicGrid(comics: visibleComics)
                         .padding()
                 }
             }
         }
-        .navigationTitle(model.total > 0 ? "搜索 · \(model.total)" : "搜索")
+        .safeAreaInset(edge: .bottom) {
+            if model.hasMore {
+                Button(model.isLoading ? "载入中…" : "继续载入下一批") {
+                    Task { await model.search(query, api: api, append: true) }
+                }.disabled(model.isLoading).padding(8).background(.regularMaterial)
+            }
+        }
+        .navigationTitle(!blocked.tags.isEmpty ? "搜索 · 已显示 \(visibleComics.count)" : (model.total > 0 ? "搜索 · \(model.total)" : "搜索"))
         .appPageBackground()
         // All five root pages stay alive in the resident deck. Without an
         // explicit placement, iOS 26 may attach this search field to the

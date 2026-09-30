@@ -20,6 +20,7 @@ private final class ComicDetailViewModel: ObservableObject {
 }
 
 struct ComicDetailView: View {
+    @ObservedObject private var blocked = BlockedTagsStore.shared
     @EnvironmentObject private var api: APIClient
     let comicID: String
     let initialComic: ComicSummary
@@ -221,13 +222,13 @@ struct ComicDetailView: View {
 
     @ViewBuilder
     private func recommendations(_ detail: ComicDetail) -> some View {
-        if !detail.relatedComics.isEmpty {
+        if !detail.relatedComics.filter(blocked.allows).isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Text("相关推荐")
                     .font(.title2.bold())
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(alignment: .top, spacing: 14) {
-                        ForEach(detail.relatedComics) { comic in
+                        ForEach(detail.relatedComics.filter(blocked.allows)) { comic in
                             NavigationLink(value: AppNavigationRoute.comic(comic)) {
                                 VStack(alignment: .leading, spacing: 7) {
                                     ComicCoverView(comic: comic)

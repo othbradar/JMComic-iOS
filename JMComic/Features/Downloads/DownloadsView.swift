@@ -31,6 +31,7 @@ enum DownloadsRoute: Hashable {
     case tasks
     case offlineComic(OfflineComic)
     case comicDetail(ComicSummary)
+    case export(String, String?)
 }
 
 enum DownloadsNavigationPolicy {
@@ -173,6 +174,8 @@ struct DownloadsView: View {
                 DownloadTasksView()
             case let .offlineComic(item):
                 OfflineComicView(item: item)
+            case let .export(comicID, chapterID):
+                OfflineExportView(comicID: comicID, chapterID: chapterID)
             case let .comicDetail(comic):
                 ComicDetailView(comicID: comic.id, initialComic: comic)
             }
@@ -263,6 +266,7 @@ struct DownloadsView: View {
             .accessibilityLabel("查看“\(item.comic.name)”的离线章节")
 
             Menu {
+                NavigationLink("导出本地全部章节 CBZ", value: DownloadsRoute.export(item.id, nil))
                 Button("删除离线漫画", systemImage: "trash", role: .destructive) {
                     deleting = item
                 }
@@ -430,19 +434,24 @@ private struct OfflineComicView: View {
     let item: OfflineComic
 
     var body: some View {
-        List(item.chapters.sorted(by: { $0.title.localizedStandardCompare($1.title) == .orderedAscending })) { chapter in
+        List(item.chapters.sorted(by: { ($0.sort, $0.id) < ($1.sort, $1.id) })) { chapter in
             if chapter.isComplete {
                 ReaderPresentationLink(
                     comic: item.comic,
                     chapter: Chapter(id: chapter.id, title: chapter.title, sort: 1)
                 ) {
                     chapterRow(chapter, complete: true)
-                }
+                }.contextMenu { NavigationLink("导出章节 CBZ", value: DownloadsRoute.export(item.id, chapter.id)) }
             } else {
                 chapterRow(chapter, complete: false)
+                    .contextMenu { NavigationLink("导出已有页面 CBZ", value: DownloadsRoute.export(item.id, chapter.id)) }
             }
         }
         .navigationTitle(item.comic.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            RootPageTrailingActions(count: 1) { NavigationLink("导出", value: DownloadsRoute.export(item.id, nil)) }
+        }
         .appPageBackground()
     }
 

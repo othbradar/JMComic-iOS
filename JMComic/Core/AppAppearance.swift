@@ -97,6 +97,11 @@ final class AppAppearanceStore: ObservableObject {
         colorMode = AppColorMode(rawValue: defaults.string(forKey: Key.colorMode) ?? "") ?? .system
     }
 
+    func reloadFromDefaults() {
+        palette = AppPalette(rawValue: defaults.string(forKey: Key.palette) ?? "") ?? .ivory
+        colorMode = AppColorMode(rawValue: defaults.string(forKey: Key.colorMode) ?? "") ?? .system
+    }
+
     var preferredColorScheme: ColorScheme? { colorMode.preferredColorScheme }
 
     func background(for scheme: ColorScheme) -> Color {

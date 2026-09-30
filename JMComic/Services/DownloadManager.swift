@@ -917,6 +917,20 @@ final class DownloadManager: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
+    func exportPlan(comicID: String, chapterID: String?) async throws -> OfflineExportPlan {
+        guard let database, !deletingComicIDs.contains(comicID) else { throw ManagementError.busy }
+        let root = JMComicStorageLayout.downloadRoot(documentsRoot: documentsRoot)
+        let cancellation = ExportCancellation()
+        return try await withTaskCancellationHandler {
+            try await fileCommits.run {
+                try cancellation.check()
+                guard let comic = try database.loadLibrary().first(where: { $0.id == comicID }) else { throw ManagementError.missingPages(1) }
+                return try OfflineExportPlan.make(comic: comic, records: database.allPageRecords(comicID: comicID), root: root, chapterID: chapterID, checkCancellation: cancellation.check)
+            }
+        } onCancel: { cancellation.cancel() }
+    }
+
+    @MainActor
     func localPageURLs(comicID: String, chapterID: String) async -> [URL] {
         guard let comic = library.first(where: { $0.id == comicID }),
               let chapter = comic.chapters.first(where: { $0.id == chapterID }),

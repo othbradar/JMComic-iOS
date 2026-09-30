@@ -82,6 +82,7 @@ final class APIClient: ObservableObject {
     private let remoteImageCache = NSCache<NSString, UIImage>()
     private let readingImages = ReadingImageLoader()
     private let readingPrefetch = ReadingPrefetchWindow()
+    private var imageCacheGeneration = UUID()
     private var remoteImageLoads: [String: SharedImageLoad] = [:]
 
     var isLoggedIn: Bool { profile != nil }
@@ -98,6 +99,7 @@ final class APIClient: ObservableObject {
         let sessionConfiguration = URLSessionConfiguration.default
         sessionConfiguration.timeoutIntervalForRequest = 20
         sessionConfiguration.timeoutIntervalForResource = 60
+        sessionConfiguration.urlCache = RebuildableURLCache.managed
         sessionConfiguration.httpShouldSetCookies = true
         sessionConfiguration.httpCookieStorage = .shared
         sessionConfiguration.requestCachePolicy = .reloadRevalidatingCacheData
@@ -1114,7 +1116,18 @@ final class APIClient: ObservableObject {
     }
     func cancelReadingPrefetch(owner: UUID) { readingPrefetch.cancel(owner: owner) }
 
+    func clearRebuildableImageCaches() async {
+        imageCacheGeneration = UUID()
+        remoteImageCache.removeAllObjects()
+        ReadingImageMemory.shared.clearRebuildableImages()
+        await Task.detached(priority: .utility) {
+            RebuildableURLCache.managed.clearGeneration()
+            URLCache.shared.removeAllCachedResponses()
+        }.value
+    }
+
     private func performRemoteImageLoad(path: String, loadID: UUID) async throws -> UIImage {
+        let generation = imageCacheGeneration
         defer {
             if remoteImageLoads[path]?.id == loadID { remoteImageLoads[path] = nil }
         }
@@ -1122,7 +1135,7 @@ final class APIClient: ObservableObject {
         let image = try await ReadingImageMemory.shared.decode(
             data: data, urgency: PageLoadUrgency(visible: false), bytesPerPixel: 8
         ) { try ImageScrambler.rasterImage(from: data) }
-        remoteImageCache.setObject(image, forKey: path as NSString, cost: Self.memoryCost(of: image))
+        if generation == imageCacheGeneration { remoteImageCache.setObject(image, forKey: path as NSString, cost: Self.memoryCost(of: image)) }
         return image
     }
 
@@ -1276,7 +1289,7 @@ final class APIClient: ObservableObject {
                     request.httpBody = Self.multipartFormData(specification.form, boundary: boundary)
                 }
                 request.timeoutInterval = 8
-                let (data, response) = try await session.data(for: request)
+                let (data, response) = try await session.data(for: RebuildableURLCache.managed.request(request))
                 guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
                 guard (200..<300).contains(http.statusCode) else { throw APIError.http(http.statusCode) }
                 guard !data.isEmpty else { throw APIError.invalidResponse }
@@ -1304,7 +1317,7 @@ final class APIClient: ObservableObject {
         )
         request.cachePolicy = .returnCacheDataElseLoad
         request.timeoutInterval = 8
-        let (data, response) = try await session.data(for: request, delegate: urgency)
+        let (data, response) = try await session.data(for: RebuildableURLCache.managed.request(request), delegate: urgency)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode),
               Self.isLikelyImageData(
@@ -1337,7 +1350,7 @@ final class APIClient: ObservableObject {
                         )
                         request.cachePolicy = .returnCacheDataElseLoad
                         request.timeoutInterval = 8
-                        let (data, response) = try await session.data(for: request, delegate: urgency)
+                        let (data, response) = try await session.data(for: RebuildableURLCache.managed.request(request), delegate: urgency)
                         guard let http = response as? HTTPURLResponse,
                               (200..<300).contains(http.statusCode),
                               Self.isLikelyImageData(
@@ -1421,7 +1434,7 @@ final class APIClient: ObservableObject {
             var request = URLRequest(url: url)
             request.timeoutInterval = 3
             request.cachePolicy = .reloadIgnoringLocalCacheData
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: RebuildableURLCache.managed.request(request))
             guard let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode),
                   !data.isEmpty else { return nil }

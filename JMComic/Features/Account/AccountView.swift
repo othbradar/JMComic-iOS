@@ -797,6 +797,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            LocalManagementLinks()
             Section("账号") {
                 if let profile = api.profile {
                     LabeledContent("当前用户", value: profile.username)
