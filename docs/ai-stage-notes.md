@@ -285,6 +285,15 @@ xcrun simctl launch 467D92A6-2187-48A6-BF24-9824B48313B1 io.github.jmcomic.mobil
 ### 实机确认与替换 1.0.2 授权
 
 - 用户已明确确认根 Tab 白屏、收藏夹计数和连续阅读回跳修复，并授权提交、推送 GitHub、用新版 IPA 替换公开 1.0.2 附件。实机反馈为用户提供，未扩大为帧率/内存或全部流程验证。
-- 提交前 `git status --short`、`git diff --check`、`git ls-remote origin refs/heads/main refs/tags/v1.0.2 'refs/tags/v1.0.2^{}'` 核对：只有本次两组修复的 5 个文件；远端 main 仍为 `da36233`，采用快进推送。保留原 v1.0.2 标签，修订附件的准确源码提交将在发布正文单独链接。
+- 提交前 `git status --short`、`git diff --check`、`git ls-remote origin refs/heads/main refs/tags/v1.0.2 'refs/tags/v1.0.2^{}'` 核对：只有本次两组修复的 5 个文件；远端 main 仍为 `da36233`，采用快进推送。保留原 v1.0.2 标签；修订附件对应本次修复提交，见下方发布记录。
 - 已确认的候选 IPA 原路径文件在发布时已不在项目内；保留的 Release-iphoneos/JMComic.app 仍完整。使用与前次相同的 Python zipfile（排序逐文件、DEFLATED level 9）重新打包到 `Artifacts/favorites-reader-fix/release/JMComic-v1.0.2-iOS18-arm64-UNSIGNED.ipa`，得到与已验收候选**完全相同**的 2,429,090 字节和 SHA-256 `ab9101d1c9fc907047ae7a7fa973911c1786b23008492fd37d6893e3780cf985`；CRC、7 个包内文件逐一对比及 plist 校验通过。未重新编译或修改程序，保持 1.0.2（23）/ 原 bundle ID / arm64 未签名。
 - 本次发布步骤沿用已记录的定向 XCTest、完整 App 构建安装及用户实机确认；未重复运行测试。`gh auth status` 未登录，使用已有 Chrome 登录会话更新同一发布页，不提取凭据。
+
+### 1.0.2 附件替换结果
+
+- 修复提交 `381699231e50739fb5bbc95df27abcc5635a74c9` 已通过 `git push origin HEAD:main` 快进推送（`da36233..3816992`）。只提交 RootView、FavoritesView、ReaderView、对应定向测试与本记录；不含构建产物或私密数据。
+- 用户随后明确要求发布页不新增这次修复说明、只更新 SHA-256。已遵守：标题仍为 `JMComic 1.0.2`，正文经标准化换行/末尾空白后与原正文仅摘要不同；没有新增白屏等说明。原标签及自动生成源码包仍对应初始 1.0.2；本次 IPA 对应上面的 `3816992` 修复提交。
+- 通过已登录 Chrome 的原发布编辑页替换同名 IPA 并保存。Release ID 仍为 `399804002`、Latest 为 v1.0.2，非草稿/非预发布。新附件 ID `600440691`，uploaded，2,429,090 字节；旧附件 ID 已不在发布资产列表，仅保留一个新版 IPA。原旧包仍保留在本地 Artifacts/v1.0.2，未清理工作区文件。
+- 实际执行 `curl -fsSL https://api.github.com/repos/othbradar/JMComic-iOS/releases/tags/v1.0.2` 和 `/releases/latest`，保存为 `Artifacts/favorites-reader-fix/release-after-replacement.json`、`release-latest.json`；核对标题、正文、附件数量/状态/大小/digest。
+- 实际执行 `curl -fL --max-time 60 --retry 1 https://github.com/othbradar/JMComic-iOS/releases/download/v1.0.2/JMComic-v1.0.2-iOS18-arm64-UNSIGNED.ipa -o Artifacts/favorites-reader-fix/release/downloaded-verification.ipa` 及 `shasum -a 256`，公开下载文件 SHA-256 为 `ab9101d1c9fc907047ae7a7fa973911c1786b23008492fd37d6893e3780cf985`，与已验收候选、本地发布包和 GitHub digest 完全一致；ZIP CRC 通过。汇总 `Artifacts/favorites-reader-fix/release-verification.json`。
+- 发布页：<https://github.com/othbradar/JMComic-iOS/releases/tag/v1.0.2>。本次未改版本/签名配置，未再次安装或重跑测试。
